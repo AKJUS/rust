@@ -7,19 +7,9 @@ use rustc_macros::{Diagnostic, LintDiagnostic, Subdiagnostic};
 use rustc_middle::ty::{self, Ty};
 use rustc_pattern_analysis::errors::Uncovered;
 use rustc_pattern_analysis::rustc::RustcPatCtxt;
-use rustc_span::{Span, Symbol};
+use rustc_span::{Ident, Span, Symbol};
 
 use crate::fluent_generated as fluent;
-
-#[derive(LintDiagnostic)]
-#[diag(mir_build_unconditional_recursion)]
-#[help]
-pub(crate) struct UnconditionalRecursion {
-    #[label]
-    pub(crate) span: Span,
-    #[label(mir_build_unconditional_recursion_call_site_label)]
-    pub(crate) call_sites: Vec<Span>,
-}
 
 #[derive(LintDiagnostic)]
 #[diag(mir_build_call_to_deprecated_safe_fn_requires_unsafe)]
@@ -763,7 +753,7 @@ pub(crate) struct BindingsWithVariantName {
     #[suggestion(code = "{ty_path}::{name}", applicability = "machine-applicable")]
     pub(crate) suggestion: Option<Span>,
     pub(crate) ty_path: String,
-    pub(crate) name: Symbol,
+    pub(crate) name: Ident,
 }
 
 #[derive(LintDiagnostic)]
@@ -800,17 +790,21 @@ pub(crate) struct IrrefutableLetPatternsWhileLet {
 
 #[derive(Diagnostic)]
 #[diag(mir_build_borrow_of_moved_value)]
-pub(crate) struct BorrowOfMovedValue<'tcx> {
+pub(crate) struct BorrowOfMovedValue {
     #[primary_span]
     #[label]
     #[label(mir_build_occurs_because_label)]
     pub(crate) binding_span: Span,
     #[label(mir_build_value_borrowed_label)]
     pub(crate) conflicts_ref: Vec<Span>,
-    pub(crate) name: Symbol,
-    pub(crate) ty: Ty<'tcx>,
+    pub(crate) name: Ident,
+    pub(crate) ty: String,
     #[suggestion(code = "ref ", applicability = "machine-applicable")]
     pub(crate) suggest_borrowing: Option<Span>,
+    #[note(mir_build_full_type_name)]
+    #[note(mir_build_consider_verbose)]
+    pub(crate) has_path: bool,
+    pub(crate) path: String,
 }
 
 #[derive(Diagnostic)]
@@ -1106,16 +1100,4 @@ impl<'a> Subdiagnostic for Rust2024IncompatiblePatSugg<'a> {
             applicability,
         );
     }
-}
-
-#[derive(Diagnostic)]
-#[diag(mir_build_force_inline)]
-#[note]
-pub(crate) struct InvalidForceInline {
-    #[primary_span]
-    pub attr_span: Span,
-    #[label(mir_build_callee)]
-    pub callee_span: Span,
-    pub callee: String,
-    pub reason: &'static str,
 }

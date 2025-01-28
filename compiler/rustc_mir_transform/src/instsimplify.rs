@@ -46,6 +46,7 @@ impl<'tcx> crate::MirPass<'tcx> for InstSimplify {
                         }
                         ctx.simplify_bool_cmp(rvalue);
                         ctx.simplify_ref_deref(rvalue);
+                        ctx.simplify_len(rvalue);
                         ctx.simplify_ptr_aggregate(rvalue);
                         ctx.simplify_cast(rvalue);
                         ctx.simplify_repeated_aggregate(rvalue);
@@ -60,6 +61,10 @@ impl<'tcx> crate::MirPass<'tcx> for InstSimplify {
             ctx.simplify_nounwind_call(block.terminator.as_mut().unwrap());
             simplify_duplicate_switch_targets(block.terminator.as_mut().unwrap());
         }
+    }
+
+    fn is_required(&self) -> bool {
+        false
     }
 }
 
@@ -157,6 +162,18 @@ impl<'tcx> InstSimplifyContext<'_, 'tcx> {
                     local: base.local,
                     projection: self.tcx.mk_place_elems(base.projection),
                 }));
+            }
+        }
+    }
+
+    /// Transform `Len([_; N])` ==> `N`.
+    fn simplify_len(&self, rvalue: &mut Rvalue<'tcx>) {
+        if let Rvalue::Len(ref place) = *rvalue {
+            let place_ty = place.ty(self.local_decls, self.tcx).ty;
+            if let ty::Array(_, len) = *place_ty.kind() {
+                let const_ = Const::Ty(self.tcx.types.usize, len);
+                let constant = ConstOperand { span: DUMMY_SP, const_, user_ty: None };
+                *rvalue = Rvalue::Use(Operand::Constant(Box::new(constant)));
             }
         }
     }

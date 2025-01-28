@@ -30,7 +30,7 @@ use crate::formats::Impl;
 use crate::formats::item_type::ItemType;
 use crate::html::escape::{Escape, EscapeBodyTextWithWbr};
 use crate::html::format::{
-    Buffer, Ending, PrintWithSpace, display_fn, join_with_double_colon, print_abi_with_space,
+    Buffer, Ending, PrintWithSpace, join_with_double_colon, print_abi_with_space,
     print_constness_with_space, print_where_clause, visibility_print_with_space,
 };
 use crate::html::markdown::{HeadingOffset, MarkdownSummaryLine};
@@ -92,7 +92,7 @@ macro_rules! item_template_methods {
     () => {};
     (document $($rest:tt)*) => {
         fn document<'b>(&'b self) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let (item, cx) = self.item_and_cx();
                 let v = document(cx, item, None, HeadingOffset::H2);
                 write!(f, "{v}")
@@ -102,7 +102,7 @@ macro_rules! item_template_methods {
     };
     (document_type_layout $($rest:tt)*) => {
         fn document_type_layout<'b>(&'b self) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let (item, cx) = self.item_and_cx();
                 let def_id = item.item_id.expect_def_id();
                 let v = document_type_layout(cx, def_id);
@@ -113,7 +113,7 @@ macro_rules! item_template_methods {
     };
     (render_attributes_in_pre $($rest:tt)*) => {
         fn render_attributes_in_pre<'b>(&'b self) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let (item, cx) = self.item_and_cx();
                 let v = render_attributes_in_pre(item, "", cx);
                 write!(f, "{v}")
@@ -123,7 +123,7 @@ macro_rules! item_template_methods {
     };
     (render_assoc_items $($rest:tt)*) => {
         fn render_assoc_items<'b>(&'b self) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let (item, cx) = self.item_and_cx();
                 let def_id = item.item_id.expect_def_id();
                 let v = render_assoc_items(cx, item, def_id, AssocItemRender::All);
@@ -140,10 +140,9 @@ macro_rules! item_template_methods {
     };
 }
 
-const ITEM_TABLE_OPEN: &str = "<ul class=\"item-table\">";
-const ITEM_TABLE_CLOSE: &str = "</ul>";
-const ITEM_TABLE_ROW_OPEN: &str = "<li>";
-const ITEM_TABLE_ROW_CLOSE: &str = "</li>";
+const ITEM_TABLE_OPEN: &str = "<dl class=\"item-table\">";
+const REEXPORTS_TABLE_OPEN: &str = "<dl class=\"item-table reexports\">";
+const ITEM_TABLE_CLOSE: &str = "</dl>";
 
 // A component in a `use` path, like `string` in std::string::ToString
 struct PathComponent {
@@ -400,37 +399,32 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                 w.write_str(ITEM_TABLE_CLOSE);
             }
             last_section = Some(my_section);
-            write_section_heading(
-                w,
-                my_section.name(),
-                &cx.derive_id(my_section.id()),
-                None,
-                ITEM_TABLE_OPEN,
-            );
+            let section_id = my_section.id();
+            let tag =
+                if section_id == "reexports" { REEXPORTS_TABLE_OPEN } else { ITEM_TABLE_OPEN };
+            write_section_heading(w, my_section.name(), &cx.derive_id(section_id), None, tag);
         }
 
         match myitem.kind {
             clean::ExternCrateItem { ref src } => {
                 use crate::html::format::anchor;
 
-                w.write_str(ITEM_TABLE_ROW_OPEN);
                 match *src {
                     Some(src) => write!(
                         w,
-                        "<div class=\"item-name\"><code>{}extern crate {} as {};",
+                        "<dt><code>{}extern crate {} as {};",
                         visibility_print_with_space(myitem, cx),
                         anchor(myitem.item_id.expect_def_id(), src, cx),
                         EscapeBodyTextWithWbr(myitem.name.unwrap().as_str()),
                     ),
                     None => write!(
                         w,
-                        "<div class=\"item-name\"><code>{}extern crate {};",
+                        "<dt><code>{}extern crate {};",
                         visibility_print_with_space(myitem, cx),
                         anchor(myitem.item_id.expect_def_id(), myitem.name.unwrap(), cx),
                     ),
                 }
-                w.write_str("</code></div>");
-                w.write_str(ITEM_TABLE_ROW_CLOSE);
+                w.write_str("</code></dt>");
             }
 
             clean::ImportItem(ref import) => {
@@ -438,28 +432,20 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                     extra_info_tags(tcx, myitem, item, Some(import_def_id)).to_string()
                 });
 
-                w.write_str(ITEM_TABLE_ROW_OPEN);
                 let id = match import.kind {
                     clean::ImportKind::Simple(s) => {
                         format!(" id=\"{}\"", cx.derive_id(format!("reexport.{s}")))
                     }
                     clean::ImportKind::Glob => String::new(),
                 };
-                let (stab_tags_before, stab_tags_after) = if stab_tags.is_empty() {
-                    ("", "")
-                } else {
-                    ("<div class=\"desc docblock-short\">", "</div>")
-                };
                 write!(
                     w,
-                    "<div class=\"item-name\"{id}>\
-                         <code>{vis}{imp}</code>\
-                     </div>\
-                     {stab_tags_before}{stab_tags}{stab_tags_after}",
+                    "<dt{id}>\
+                         <code>{vis}{imp}</code>{stab_tags}\
+                     </dt>",
                     vis = visibility_print_with_space(myitem, cx),
                     imp = import.print(cx),
                 );
-                w.write_str(ITEM_TABLE_ROW_CLOSE);
             }
 
             _ => {
@@ -492,22 +478,18 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                     _ => "",
                 };
 
-                w.write_str(ITEM_TABLE_ROW_OPEN);
                 let docs =
                     MarkdownSummaryLine(&myitem.doc_value(), &myitem.links(cx)).into_string();
-                let (docs_before, docs_after) = if docs.is_empty() {
-                    ("", "")
-                } else {
-                    ("<div class=\"desc docblock-short\">", "</div>")
-                };
+                let (docs_before, docs_after) =
+                    if docs.is_empty() { ("", "") } else { ("<dd>", "</dd>") };
                 write!(
                     w,
-                    "<div class=\"item-name\">\
+                    "<dt>\
                         <a class=\"{class}\" href=\"{href}\" title=\"{title}\">{name}</a>\
                         {visibility_and_hidden}\
                         {unsafety_flag}\
                         {stab_tags}\
-                     </div>\
+                     </dt>\
                      {docs_before}{docs}{docs_after}",
                     name = EscapeBodyTextWithWbr(myitem.name.unwrap().as_str()),
                     visibility_and_hidden = visibility_and_hidden,
@@ -521,7 +503,6 @@ fn item_module(w: &mut Buffer, cx: &Context<'_>, item: &clean::Item, items: &[cl
                         .collect::<Vec<_>>()
                         .join(" "),
                 );
-                w.write_str(ITEM_TABLE_ROW_CLOSE);
             }
         }
     }
@@ -539,13 +520,13 @@ fn extra_info_tags<'a, 'tcx: 'a>(
     parent: &'a clean::Item,
     import_def_id: Option<DefId>,
 ) -> impl fmt::Display + 'a + Captures<'tcx> {
-    display_fn(move |f| {
+    fmt::from_fn(move |f| {
         fn tag_html<'a>(
             class: &'a str,
             title: &'a str,
             contents: &'a str,
         ) -> impl fmt::Display + 'a {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 write!(
                     f,
                     r#"<wbr><span class="stab {class}" title="{title}">{contents}</span>"#,
@@ -933,7 +914,6 @@ fn item_trait(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, t: &clean::Tra
     let mut extern_crates = FxIndexSet::default();
 
     if !t.is_dyn_compatible(cx.tcx()) {
-        // FIXME(dyn_compat_renaming): Update the URL once the Reference is updated.
         write_section_heading(
             w,
             "Dyn Compatibility",
@@ -941,7 +921,7 @@ fn item_trait(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, t: &clean::Tra
             None,
             format!(
                 "<div class=\"dyn-compatibility-info\"><p>This trait is <b>not</b> \
-                <a href=\"{base}/reference/items/traits.html#object-safety\">dyn compatible</a>.</p>\
+                <a href=\"{base}/reference/items/traits.html#dyn-compatibility\">dyn compatible</a>.</p>\
                 <p><i>In older versions of Rust, dyn compatibility was called \"object safety\", \
                 so this trait is not object safe.</i></p></div>",
                 base = crate::clean::utils::DOC_RUST_LANG_ORG_CHANNEL
@@ -1395,7 +1375,7 @@ fn item_union(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, s: &clean::Uni
 
     impl<'a, 'cx: 'a> ItemUnion<'a, 'cx> {
         fn render_union<'b>(&'b self) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let v = render_union(self.it, Some(&self.s.generics), &self.s.fields, self.cx);
                 write!(f, "{v}")
             })
@@ -1405,7 +1385,7 @@ fn item_union(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, s: &clean::Uni
             &'b self,
             field: &'a clean::Item,
         ) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let v = document(self.cx, field, Some(self.it), HeadingOffset::H3);
                 write!(f, "{v}")
             })
@@ -1419,7 +1399,7 @@ fn item_union(w: &mut Buffer, cx: &Context<'_>, it: &clean::Item, s: &clean::Uni
             &'b self,
             ty: &'a clean::Type,
         ) -> impl fmt::Display + Captures<'a> + 'b + Captures<'cx> {
-            display_fn(move |f| {
+            fmt::from_fn(move |f| {
                 let v = ty.print(self.cx);
                 write!(f, "{v}")
             })
@@ -1446,7 +1426,7 @@ fn print_tuple_struct_fields<'a, 'cx: 'a>(
     cx: &'a Context<'cx>,
     s: &'a [clean::Item],
 ) -> impl fmt::Display + 'a + Captures<'cx> {
-    display_fn(|f| {
+    fmt::from_fn(|f| {
         if !s.is_empty()
             && s.iter().all(|field| {
                 matches!(field.kind, clean::StrippedItem(box clean::StructFieldItem(..)))
@@ -2171,7 +2151,7 @@ fn render_union<'a, 'cx: 'a>(
     fields: &'a [clean::Item],
     cx: &'a Context<'cx>,
 ) -> impl fmt::Display + 'a + Captures<'cx> {
-    display_fn(move |mut f| {
+    fmt::from_fn(move |mut f| {
         write!(f, "{}union {}", visibility_print_with_space(it, cx), it.name.unwrap(),)?;
 
         let where_displayed = g
@@ -2351,7 +2331,7 @@ fn document_non_exhaustive_header(item: &clean::Item) -> &str {
 }
 
 fn document_non_exhaustive(item: &clean::Item) -> impl fmt::Display + '_ {
-    display_fn(|f| {
+    fmt::from_fn(|f| {
         if item.is_non_exhaustive() {
             write!(
                 f,

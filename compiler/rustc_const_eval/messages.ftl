@@ -416,7 +416,7 @@ const_eval_unsized_local = unsized locals are not supported
 const_eval_unstable_const_fn = `{$def_path}` is not yet stable as a const fn
 const_eval_unstable_in_stable_exposed =
     const function that might be (indirectly) exposed to stable cannot use `#[feature({$gate})]`
-    .is_function_call = mark the callee as `#[rustc_const_stable_indirect]` if it does not itself require any unsafe features
+    .is_function_call = mark the callee as `#[rustc_const_stable_indirect]` if it does not itself require any unstable features
     .unstable_sugg = if the {$is_function_call2 ->
             [true] caller
             *[false] function
@@ -424,7 +424,7 @@ const_eval_unstable_in_stable_exposed =
     .bypass_sugg = otherwise, as a last resort `#[rustc_allow_const_fn_unstable]` can be used to bypass stability checks (this requires team approval)
 
 const_eval_unstable_intrinsic = `{$name}` is not yet stable as a const intrinsic
-    .help = add `#![feature({$feature})]` to the crate attributes to enable
+const_eval_unstable_intrinsic_suggestion = add `#![feature({$feature})]` to the crate attributes to enable
 
 const_eval_unterminated_c_string =
     reading a null-terminated string starting at {$pointer} with no null found before end of allocation

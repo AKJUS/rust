@@ -14,14 +14,13 @@ use rustc_errors::{
     Applicability, Diag, EmissionGuarantee, MultiSpan, Style, SuggestionStyle, pluralize,
     struct_span_code_err,
 };
-use rustc_hir as hir;
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::DefId;
-use rustc_hir::intravisit::Visitor;
+use rustc_hir::intravisit::{Visitor, VisitorExt};
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{
-    CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, HirId, Node, expr_needs_parens,
-    is_range_literal,
+    self as hir, AmbigArg, CoroutineDesugaring, CoroutineKind, CoroutineSource, Expr, HirId, Node,
+    expr_needs_parens, is_range_literal,
 };
 use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferCtxt, InferOk};
 use rustc_middle::hir::map;
@@ -32,9 +31,9 @@ use rustc_middle::ty::print::{
     with_forced_trimmed_paths, with_no_trimmed_paths,
 };
 use rustc_middle::ty::{
-    self, AdtKind, GenericArgs, InferTy, IsSuggestable, ToPolyTraitRef, Ty, TyCtxt, TypeFoldable,
-    TypeFolder, TypeSuperFoldable, TypeVisitableExt, TypeckResults, Upcast,
-    suggest_arbitrary_trait_bound, suggest_constraining_type_param,
+    self, AdtKind, GenericArgs, InferTy, IsSuggestable, Ty, TyCtxt, TypeFoldable, TypeFolder,
+    TypeSuperFoldable, TypeVisitableExt, TypeckResults, Upcast, suggest_arbitrary_trait_bound,
+    suggest_constraining_type_param,
 };
 use rustc_middle::{bug, span_bug};
 use rustc_span::def_id::LocalDefId;
@@ -179,7 +178,7 @@ pub fn suggest_restriction<'tcx, G: EmissionGuarantee>(
         let mut ty_spans = vec![];
         for input in fn_sig.decl.inputs {
             ReplaceImplTraitVisitor { ty_spans: &mut ty_spans, param_did: param.def_id }
-                .visit_ty(input);
+                .visit_ty_unambig(input);
         }
         // The type param `T: Trait` we will suggest to introduce.
         let type_param = format!("{type_param_name}: {bound_str}");
@@ -218,15 +217,15 @@ pub fn suggest_restriction<'tcx, G: EmissionGuarantee>(
             (_, None) => predicate_constraint(hir_generics, trait_pred.upcast(tcx)),
             (None, Some((ident, []))) => (
                 ident.span.shrink_to_hi(),
-                format!(": {}", trait_pred.to_poly_trait_ref().print_trait_sugared()),
+                format!(": {}", trait_pred.print_modifiers_and_trait_path()),
             ),
             (_, Some((_, [.., bounds]))) => (
                 bounds.span().shrink_to_hi(),
-                format!(" + {}", trait_pred.to_poly_trait_ref().print_trait_sugared()),
+                format!(" + {}", trait_pred.print_modifiers_and_trait_path()),
             ),
             (Some(_), Some((_, []))) => (
                 hir_generics.span.shrink_to_hi(),
-                format!(": {}", trait_pred.to_poly_trait_ref().print_trait_sugared()),
+                format!(": {}", trait_pred.print_modifiers_and_trait_path()),
             ),
         };
 
@@ -2740,7 +2739,6 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             | ObligationCauseCode::IfExpression { .. }
             | ObligationCauseCode::IfExpressionWithNoElse
             | ObligationCauseCode::MainFunctionType
-            | ObligationCauseCode::StartFunctionType
             | ObligationCauseCode::LangFunctionType(_)
             | ObligationCauseCode::IntrinsicType
             | ObligationCauseCode::MethodReceiver
@@ -3075,7 +3073,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
                 }
                 if let Some(ty) = ty {
                     match ty.kind {
-                        hir::TyKind::TraitObject(traits, _, _) => {
+                        hir::TyKind::TraitObject(traits, _) => {
                             let (span, kw) = match traits {
                                 [first, ..] if first.span.lo() == ty.span.lo() => {
                                     // Missing `dyn` in front of trait object.
@@ -3729,7 +3727,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         &self,
         obligation: &PredicateObligation<'tcx>,
         err: &mut Diag<'_>,
-        trait_ref: ty::PolyTraitRef<'tcx>,
+        trait_pred: ty::PolyTraitPredicate<'tcx>,
     ) {
         let rhs_span = match obligation.cause.code() {
             ObligationCauseCode::BinOp { rhs_span: Some(span), rhs_is_lit, .. } if *rhs_is_lit => {
@@ -3737,8 +3735,9 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
             }
             _ => return,
         };
-        if let ty::Float(_) = trait_ref.skip_binder().self_ty().kind()
-            && let ty::Infer(InferTy::IntVar(_)) = trait_ref.skip_binder().args.type_at(1).kind()
+        if let ty::Float(_) = trait_pred.skip_binder().self_ty().kind()
+            && let ty::Infer(InferTy::IntVar(_)) =
+                trait_pred.skip_binder().trait_ref.args.type_at(1).kind()
         {
             err.span_suggestion_verbose(
                 rhs_span.shrink_to_hi(),
@@ -4448,7 +4447,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         &self,
         err: &mut Diag<'_>,
         obligation: &PredicateObligation<'tcx>,
-        trait_ref: ty::PolyTraitRef<'tcx>,
+        trait_pred: ty::PolyTraitPredicate<'tcx>,
         candidate_impls: &[ImplCandidate<'tcx>],
         span: Span,
     ) {
@@ -4464,7 +4463,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         // 1. `[T; _]` (array of T)
         // 2. `&[T; _]` (reference to array of T)
         // 3. `&mut [T; _]` (mutable reference to array of T)
-        let (element_ty, mut mutability) = match *trait_ref.skip_binder().self_ty().kind() {
+        let (element_ty, mut mutability) = match *trait_pred.skip_binder().self_ty().kind() {
             ty::Array(element_ty, _) => (element_ty, None),
 
             ty::Ref(_, pointee_ty, mutability) => match *pointee_ty.kind() {
@@ -4620,14 +4619,14 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
     pub(super) fn suggest_desugaring_async_fn_in_trait(
         &self,
         err: &mut Diag<'_>,
-        trait_ref: ty::PolyTraitRef<'tcx>,
+        trait_pred: ty::PolyTraitPredicate<'tcx>,
     ) {
         // Don't suggest if RTN is active -- we should prefer a where-clause bound instead.
         if self.tcx.features().return_type_notation() {
             return;
         }
 
-        let trait_def_id = trait_ref.def_id();
+        let trait_def_id = trait_pred.def_id();
 
         // Only suggest specifying auto traits
         if !self.tcx.trait_is_auto(trait_def_id) {
@@ -4635,7 +4634,7 @@ impl<'a, 'tcx> TypeErrCtxt<'a, 'tcx> {
         }
 
         // Look for an RPITIT
-        let ty::Alias(ty::Projection, alias_ty) = trait_ref.self_ty().skip_binder().kind() else {
+        let ty::Alias(ty::Projection, alias_ty) = trait_pred.self_ty().skip_binder().kind() else {
             return;
         };
         let Some(ty::ImplTraitInTraitData::Trait { fn_def_id, opaque_def_id }) =
@@ -5065,7 +5064,7 @@ pub struct SelfVisitor<'v> {
 }
 
 impl<'v> Visitor<'v> for SelfVisitor<'v> {
-    fn visit_ty(&mut self, ty: &'v hir::Ty<'v>) {
+    fn visit_ty(&mut self, ty: &'v hir::Ty<'v, AmbigArg>) {
         if let hir::TyKind::Path(path) = ty.kind
             && let hir::QPath::TypeRelative(inner_ty, segment) = path
             && (Some(segment.ident.name) == self.name || self.name.is_none())
@@ -5073,7 +5072,7 @@ impl<'v> Visitor<'v> for SelfVisitor<'v> {
             && let hir::QPath::Resolved(None, inner_path) = inner_path
             && let Res::SelfTyAlias { .. } = inner_path.res
         {
-            self.paths.push(ty);
+            self.paths.push(ty.as_unambig_ty());
         }
         hir::intravisit::walk_ty(self, ty);
     }
@@ -5187,7 +5186,7 @@ struct ReplaceImplTraitVisitor<'a> {
 }
 
 impl<'a, 'hir> hir::intravisit::Visitor<'hir> for ReplaceImplTraitVisitor<'a> {
-    fn visit_ty(&mut self, t: &'hir hir::Ty<'hir>) {
+    fn visit_ty(&mut self, t: &'hir hir::Ty<'hir, AmbigArg>) {
         if let hir::TyKind::Path(hir::QPath::Resolved(
             None,
             hir::Path { res: Res::Def(_, segment_did), .. },
@@ -5480,7 +5479,7 @@ impl<'v> Visitor<'v> for FindTypeParam {
         // Skip where-clauses, to avoid suggesting indirection for type parameters found there.
     }
 
-    fn visit_ty(&mut self, ty: &hir::Ty<'_>) {
+    fn visit_ty(&mut self, ty: &hir::Ty<'_, AmbigArg>) {
         // We collect the spans of all uses of the "bare" type param, like in `field: T` or
         // `field: (T, T)` where we could make `T: ?Sized` while skipping cases that are known to be
         // valid like `field: &'a T` or `field: *mut T` and cases that *might* have further `Sized`

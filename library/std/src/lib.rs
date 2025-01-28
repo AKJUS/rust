@@ -320,6 +320,8 @@
 // Library features (core):
 // tidy-alphabetical-start
 #![feature(array_chunks)]
+#![feature(bstr)]
+#![feature(bstr_internals)]
 #![feature(c_str_module)]
 #![feature(char_internals)]
 #![feature(clone_to_uninit)]
@@ -333,7 +335,6 @@
 #![feature(extend_one)]
 #![feature(float_gamma)]
 #![feature(float_minimum_maximum)]
-#![feature(float_next_up_down)]
 #![feature(fmt_internals)]
 #![feature(hasher_prefixfree_extras)]
 #![feature(hashmap_internals)]
@@ -582,6 +583,8 @@ pub mod f64;
 pub mod thread;
 pub mod ascii;
 pub mod backtrace;
+#[unstable(feature = "bstr", issue = "134915")]
+pub mod bstr;
 pub mod collections;
 pub mod env;
 pub mod error;
@@ -596,8 +599,6 @@ pub mod panic;
 #[unstable(feature = "pattern_type_macro", issue = "123646")]
 pub mod pat;
 pub mod path;
-#[unstable(feature = "anonymous_pipe", issue = "127154")]
-pub mod pipe;
 pub mod process;
 #[unstable(feature = "random", issue = "130703")]
 pub mod random;

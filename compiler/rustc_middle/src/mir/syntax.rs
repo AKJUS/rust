@@ -417,7 +417,14 @@ pub enum StatementKind<'tcx> {
     ///
     /// Interpreters and codegen backends that don't support coverage instrumentation
     /// can usually treat this as a no-op.
-    Coverage(CoverageKind),
+    Coverage(
+        // Coverage statements are unlikely to ever contain type information in
+        // the foreseeable future, so excluding them from TypeFoldable/TypeVisitable
+        // avoids some unhelpful derive boilerplate.
+        #[type_foldable(identity)]
+        #[type_visitable(ignore)]
+        CoverageKind,
+    ),
 
     /// Denotes a call to an intrinsic that does not require an unwind path and always returns.
     /// This avoids adding a new block and a terminator for simple intrinsics.
@@ -1350,6 +1357,16 @@ pub enum Rvalue<'tcx> {
     /// Like with references, the semantics of this operation are heavily dependent on the aliasing
     /// model.
     RawPtr(Mutability, Place<'tcx>),
+
+    /// Yields the length of the place, as a `usize`.
+    ///
+    /// If the type of the place is an array, this is the array length. For slices (`[T]`, not
+    /// `&[T]`) this accesses the place's metadata to determine the length. This rvalue is
+    /// ill-formed for places of other types.
+    ///
+    /// This cannot be a `UnOp(PtrMetadata, _)` because that expects a value, and we only
+    /// have a place, and `UnOp(PtrMetadata, RawPtr(place))` is not a thing.
+    Len(Place<'tcx>),
 
     /// Performs essentially all of the casts that can be performed via `as`.
     ///

@@ -25,6 +25,8 @@ mir_build_borrow_of_moved_value = borrow of moved value
     .occurs_because_label = move occurs because `{$name}` has type `{$ty}`, which does not implement the `Copy` trait
     .value_borrowed_label = value borrowed here after move
     .suggestion = borrow this binding in the pattern to avoid moving the value
+    .full_type_name = the full type name has been written to '{$path}'
+    .consider_verbose = consider using `--verbose` to print the full type name to the console
 
 mir_build_call_to_deprecated_safe_fn_requires_unsafe =
     call to deprecated safe function `{$function}` is unsafe and requires unsafe block
@@ -117,12 +119,6 @@ mir_build_extern_static_requires_unsafe_unsafe_op_in_unsafe_fn_allowed =
     use of extern static is unsafe and requires unsafe function or block
     .note = extern statics are not controlled by the Rust type system: invalid data, aliasing violations or data races will cause undefined behavior
     .label = use of extern static
-
-mir_build_force_inline =
-    `{$callee}` is incompatible with `#[rustc_force_inline]`
-    .attr = annotation here
-    .callee = `{$callee}` defined here
-    .note = incompatible due to: {$reason}
 
 mir_build_inform_irrefutable = `let` bindings require an "irrefutable pattern", like a `struct` or an `enum` with only one variant
 
@@ -329,12 +325,6 @@ mir_build_type_not_structural_def = `{$ty}` must be annotated with `#[derive(Par
 mir_build_type_not_structural_more_info = see https://doc.rust-lang.org/stable/std/marker/trait.StructuralPartialEq.html for details
 mir_build_type_not_structural_tip =
     the `PartialEq` trait must be derived, manual `impl`s are not sufficient; see https://doc.rust-lang.org/stable/std/marker/trait.StructuralPartialEq.html for details
-
-mir_build_unconditional_recursion = function cannot return without recursing
-    .label = cannot return without recursing
-    .help = a `loop` may express intention better if this is on purpose
-
-mir_build_unconditional_recursion_call_site_label = recursive call site
 
 mir_build_union_field_requires_unsafe =
     access to union field is unsafe and requires unsafe block
