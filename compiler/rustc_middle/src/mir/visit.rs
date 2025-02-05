@@ -636,7 +636,7 @@ macro_rules! make_mir_visitor {
                     OverflowNeg(op) | DivisionByZero(op) | RemainderByZero(op) => {
                         self.visit_operand(op, location);
                     }
-                    ResumedAfterReturn(_) | ResumedAfterPanic(_) => {
+                    ResumedAfterReturn(_) | ResumedAfterPanic(_) | NullPointerDereference => {
                         // Nothing to visit
                     }
                     MisalignedPointerDereference { required, found } => {
@@ -685,14 +685,25 @@ macro_rules! make_mir_visitor {
 
                     Rvalue::RawPtr(m, path) => {
                         let ctx = match m {
-                            Mutability::Mut => PlaceContext::MutatingUse(
+                            RawPtrKind::Mut => PlaceContext::MutatingUse(
                                 MutatingUseContext::RawBorrow
                             ),
-                            Mutability::Not => PlaceContext::NonMutatingUse(
+                            RawPtrKind::Const => PlaceContext::NonMutatingUse(
                                 NonMutatingUseContext::RawBorrow
+                            ),
+                            RawPtrKind::FakeForPtrMetadata => PlaceContext::NonMutatingUse(
+                                NonMutatingUseContext::Inspect
                             ),
                         };
                         self.visit_place(path, ctx, location);
+                    }
+
+                    Rvalue::Len(path) => {
+                        self.visit_place(
+                            path,
+                            PlaceContext::NonMutatingUse(NonMutatingUseContext::Inspect),
+                            location
+                        );
                     }
 
                     Rvalue::Cast(_cast_kind, operand, ty) => {
@@ -768,6 +779,11 @@ macro_rules! make_mir_visitor {
 
                     Rvalue::ShallowInitBox(operand, ty) => {
                         self.visit_operand(operand, location);
+                        self.visit_ty($(& $mutability)? *ty, TyContext::Location(location));
+                    }
+
+                    Rvalue::WrapUnsafeBinder(op, ty) => {
+                        self.visit_operand(op, location);
                         self.visit_ty($(& $mutability)? *ty, TyContext::Location(location));
                     }
                 }
@@ -1140,6 +1156,11 @@ macro_rules! visit_place_fns {
                     self.visit_ty(&mut new_ty, TyContext::Location(location));
                     if ty != new_ty { Some(PlaceElem::Subtype(new_ty)) } else { None }
                 }
+                PlaceElem::UnwrapUnsafeBinder(ty) => {
+                    let mut new_ty = ty;
+                    self.visit_ty(&mut new_ty, TyContext::Location(location));
+                    if ty != new_ty { Some(PlaceElem::UnwrapUnsafeBinder(new_ty)) } else { None }
+                }
                 PlaceElem::Deref
                 | PlaceElem::ConstantIndex { .. }
                 | PlaceElem::Subslice { .. }
@@ -1208,7 +1229,8 @@ macro_rules! visit_place_fns {
             match elem {
                 ProjectionElem::OpaqueCast(ty)
                 | ProjectionElem::Subtype(ty)
-                | ProjectionElem::Field(_, ty) => {
+                | ProjectionElem::Field(_, ty)
+                | ProjectionElem::UnwrapUnsafeBinder(ty) => {
                     self.visit_ty(ty, TyContext::Location(location));
                 }
                 ProjectionElem::Index(local) => {

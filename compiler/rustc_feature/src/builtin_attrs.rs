@@ -408,11 +408,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         crate_type, CrateLevel, template!(NameValueStr: "bin|lib|..."), DuplicatesOk,
         EncodeCrossCrate::No,
     ),
-    // crate_id is deprecated
-    ungated!(
-        crate_id, CrateLevel, template!(NameValueStr: "ignored"), FutureWarnFollowing,
-        EncodeCrossCrate::No,
-    ),
 
     // ABI, linking, symbols, and FFI
     ungated!(
@@ -448,8 +443,6 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
 
     // Entry point:
-    ungated!(start, Normal, template!(Word), WarnFollowing, EncodeCrossCrate::No),
-    ungated!(no_start, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
     ungated!(no_main, CrateLevel, template!(Word), WarnFollowing, EncodeCrossCrate::No),
 
     // Modules, prelude, and resolution:
@@ -533,7 +526,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
     // RFC 2412
     gated!(
-        optimize, Normal, template!(List: "size|speed"), ErrorPreceding,
+        optimize, Normal, template!(List: "none|size|speed"), ErrorPreceding,
         EncodeCrossCrate::No, optimize_attribute, experimental!(optimize)
     ),
 
@@ -623,7 +616,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
         EncodeCrossCrate::No, "allow_internal_unsafe side-steps the unsafe_code lint",
     ),
     rustc_attr!(
-        rustc_allowed_through_unstable_modules, Normal, template!(Word, NameValueStr: "deprecation message"),
+        rustc_allowed_through_unstable_modules, Normal, template!(NameValueStr: "deprecation message"),
         WarnFollowing, EncodeCrossCrate::No,
         "rustc_allowed_through_unstable_modules special cases accidental stabilizations of stable items \
         through unstable paths"
@@ -1143,7 +1136,7 @@ pub const BUILTIN_ATTRIBUTES: &[BuiltinAttribute] = &[
     ),
     rustc_attr!(
         TEST, rustc_dump_vtable, Normal, template!(Word),
-        WarnFollowing, EncodeCrossCrate::Yes
+        WarnFollowing, EncodeCrossCrate::No
     ),
     rustc_attr!(
         TEST, rustc_dummy, Normal, template!(Word /* doesn't matter*/),

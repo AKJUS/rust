@@ -22,7 +22,6 @@ use rustc_hir::intravisit::{self, Visitor};
 use rustc_hir::{AnonConst, Attribute, Expr, ImplItemKind, ItemKind, Node, Safety, TraitItemKind};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::hir::nested_filter;
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty;
 use rustc_resolve::rustdoc::{
     DocFragment, add_doc_fragment, attrs_to_doc_fragments, main_body_opts, source_span_for_markdown_range,
@@ -430,6 +429,39 @@ declare_clippy_lint! {
 
 declare_clippy_lint! {
     /// ### What it does
+    ///
+    /// Detects overindented list items in doc comments where the continuation
+    /// lines are indented more than necessary.
+    ///
+    /// ### Why is this bad?
+    ///
+    /// Overindented list items in doc comments can lead to inconsistent and
+    /// poorly formatted documentation when rendered. Excessive indentation may
+    /// cause the text to be misinterpreted as a nested list item or code block,
+    /// affecting readability and the overall structure of the documentation.
+    ///
+    /// ### Example
+    ///
+    /// ```no_run
+    /// /// - This is the first item in a list
+    /// ///      and this line is overindented.
+    /// # fn foo() {}
+    /// ```
+    ///
+    /// Fixes this into:
+    /// ```no_run
+    /// /// - This is the first item in a list
+    /// ///   and this line is overindented.
+    /// # fn foo() {}
+    /// ```
+    #[clippy::version = "1.80.0"]
+    pub DOC_OVERINDENTED_LIST_ITEMS,
+    style,
+    "ensure list items are not overindented"
+}
+
+declare_clippy_lint! {
+    /// ### What it does
     /// Checks if the first paragraph in the documentation of items listed in the module page is too long.
     ///
     /// ### Why is this bad?
@@ -617,6 +649,7 @@ impl_lint_pass!(Documentation => [
     SUSPICIOUS_DOC_COMMENTS,
     EMPTY_DOCS,
     DOC_LAZY_CONTINUATION,
+    DOC_OVERINDENTED_LIST_ITEMS,
     EMPTY_LINE_AFTER_OUTER_ATTR,
     EMPTY_LINE_AFTER_DOC_COMMENTS,
     TOO_LONG_FIRST_DOC_PARAGRAPH,
@@ -641,7 +674,7 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
                 match item.kind {
                     ItemKind::Fn { sig, body: body_id, .. } => {
                         if !(is_entrypoint_fn(cx, item.owner_id.to_def_id())
-                            || in_external_macro(cx.tcx.sess, item.span))
+                            || item.span.in_external_macro(cx.tcx.sess.source_map()))
                         {
                             let body = cx.tcx.hir().body(body_id);
 
@@ -677,7 +710,7 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
             },
             Node::TraitItem(trait_item) => {
                 if let TraitItemKind::Fn(sig, ..) = trait_item.kind
-                    && !in_external_macro(cx.tcx.sess, trait_item.span)
+                    && !trait_item.span.in_external_macro(cx.tcx.sess.source_map())
                 {
                     missing_headers::check(
                         cx,
@@ -692,7 +725,7 @@ impl<'tcx> LateLintPass<'tcx> for Documentation {
             },
             Node::ImplItem(impl_item) => {
                 if let ImplItemKind::Fn(sig, body_id) = impl_item.kind
-                    && !in_external_macro(cx.tcx.sess, impl_item.span)
+                    && !impl_item.span.in_external_macro(cx.tcx.sess.source_map())
                     && !is_trait_impl_item(cx, impl_item.hir_id())
                 {
                     let body = cx.tcx.hir().body(body_id);
@@ -757,7 +790,7 @@ fn check_attrs(cx: &LateContext<'_>, valid_idents: &FxHashSet<String>, attrs: &[
 
     let (fragments, _) = attrs_to_doc_fragments(
         attrs.iter().filter_map(|attr| {
-            if in_external_macro(cx.sess(), attr.span) {
+            if attr.span.in_external_macro(cx.sess().source_map()) {
                 None
             } else {
                 Some((attr, None))

@@ -50,7 +50,6 @@ use rustc_infer::traits::{
     IfExpressionCause, MatchExpressionArmCause, Obligation, PredicateObligation,
     PredicateObligations,
 };
-use rustc_middle::lint::in_external_macro;
 use rustc_middle::span_bug;
 use rustc_middle::traits::BuiltinImplSource;
 use rustc_middle::ty::adjustment::{
@@ -461,9 +460,17 @@ impl<'f, 'tcx> Coerce<'f, 'tcx> {
         // to the target type), since that should be the least
         // confusing.
         let Some(InferOk { value: ty, mut obligations }) = found else {
-            let err = first_error.expect("coerce_borrowed_pointer had no error");
-            debug!("coerce_borrowed_pointer: failed with err = {:?}", err);
-            return Err(err);
+            if let Some(first_error) = first_error {
+                debug!("coerce_borrowed_pointer: failed with err = {:?}", first_error);
+                return Err(first_error);
+            } else {
+                // This may happen in the new trait solver since autoderef requires
+                // the pointee to be structurally normalizable, or else it'll just bail.
+                // So when we have a type like `&<not well formed>`, then we get no
+                // autoderef steps (even though there should be at least one). That means
+                // we get no type mismatches, since the loop above just exits early.
+                return Err(TypeError::Mismatch);
+            }
         };
 
         if ty == a && mt_a.mutbl.is_not() && autoderef.step_count() == 1 {
@@ -1124,7 +1131,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 if self.next_trait_solver()
                     && let ty::Alias(..) = ty.kind()
                 {
-                    ocx.structurally_normalize(&cause, self.param_env, ty)
+                    ocx.structurally_normalize_ty(&cause, self.param_env, ty)
                 } else {
                     Ok(ty)
                 }
@@ -1839,30 +1846,26 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
             fcx.probe(|_| {
                 let ocx = ObligationCtxt::new(fcx);
                 ocx.register_obligations(
-                    fcx.tcx.item_super_predicates(rpit_def_id).iter_identity().filter_map(
-                        |clause| {
-                            let predicate = clause
-                                .kind()
-                                .map_bound(|clause| match clause {
-                                    ty::ClauseKind::Trait(trait_pred) => Some(
-                                        ty::ClauseKind::Trait(trait_pred.with_self_ty(fcx.tcx, ty)),
-                                    ),
-                                    ty::ClauseKind::Projection(proj_pred) => {
-                                        Some(ty::ClauseKind::Projection(
-                                            proj_pred.with_self_ty(fcx.tcx, ty),
-                                        ))
-                                    }
-                                    _ => None,
-                                })
-                                .transpose()?;
-                            Some(Obligation::new(
-                                fcx.tcx,
-                                ObligationCause::dummy(),
-                                fcx.param_env,
-                                predicate,
-                            ))
-                        },
-                    ),
+                    fcx.tcx.item_self_bounds(rpit_def_id).iter_identity().filter_map(|clause| {
+                        let predicate = clause
+                            .kind()
+                            .map_bound(|clause| match clause {
+                                ty::ClauseKind::Trait(trait_pred) => Some(ty::ClauseKind::Trait(
+                                    trait_pred.with_self_ty(fcx.tcx, ty),
+                                )),
+                                ty::ClauseKind::Projection(proj_pred) => Some(
+                                    ty::ClauseKind::Projection(proj_pred.with_self_ty(fcx.tcx, ty)),
+                                ),
+                                _ => None,
+                            })
+                            .transpose()?;
+                        Some(Obligation::new(
+                            fcx.tcx,
+                            ObligationCause::dummy(),
+                            fcx.param_env,
+                            predicate,
+                        ))
+                    }),
                 );
                 ocx.select_where_possible().is_empty()
             })
@@ -1933,7 +1936,7 @@ impl<'tcx, 'exprs, E: AsCoercionSite> CoerceMany<'tcx, 'exprs, E> {
                     cond_expr.span.desugaring_kind(),
                     None | Some(DesugaringKind::WhileLoop)
                 )
-                && !in_external_macro(fcx.tcx.sess, cond_expr.span)
+                && !cond_expr.span.in_external_macro(fcx.tcx.sess.source_map())
                 && !matches!(
                     cond_expr.kind,
                     hir::ExprKind::Match(.., hir::MatchSource::TryDesugar(_))

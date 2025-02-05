@@ -21,7 +21,7 @@ use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 use tracing::{debug, debug_span, trace};
 
-use crate::coverage::counters::{CoverageCounters, Site};
+use crate::coverage::counters::CoverageCounters;
 use crate::coverage::graph::CoverageGraph;
 use crate::coverage::mappings::ExtractedMappings;
 
@@ -61,6 +61,10 @@ impl<'tcx> crate::MirPass<'tcx> for InstrumentCoverage {
 
         instrument_function_for_coverage(tcx, mir_body);
     }
+
+    fn is_required(&self) -> bool {
+        false
+    }
 }
 
 fn instrument_function_for_coverage<'tcx>(tcx: TyCtxt<'tcx>, mir_body: &mut mir::Body<'tcx>) {
@@ -89,8 +93,7 @@ fn instrument_function_for_coverage<'tcx>(tcx: TyCtxt<'tcx>, mir_body: &mut mir:
         return;
     }
 
-    let coverage_counters =
-        CoverageCounters::make_bcb_counters(&graph, &bcbs_with_counter_mappings);
+    let coverage_counters = counters::make_bcb_counters(&graph, &bcbs_with_counter_mappings);
 
     let mappings = create_mappings(&extracted_mappings, &coverage_counters);
     if mappings.is_empty() {
@@ -181,7 +184,12 @@ fn create_mappings(
     ));
 
     for (decision, branches) in mcdc_mappings {
-        let num_conditions = branches.len() as u16;
+        // FIXME(#134497): Previously it was possible for some of these branch
+        // conversions to fail, in which case the remaining branches in the
+        // decision would be degraded to plain `MappingKind::Branch`.
+        // The changes in #134497 made that failure impossible, because the
+        // fallible step was deferred to codegen. But the corresponding code
+        // in codegen wasn't updated to detect the need for a degrade step.
         let conditions = branches
             .into_iter()
             .map(
@@ -207,24 +215,13 @@ fn create_mappings(
             )
             .collect::<Vec<_>>();
 
-        if conditions.len() == num_conditions as usize {
-            // LLVM requires end index for counter mapping regions.
-            let kind = MappingKind::MCDCDecision(DecisionInfo {
-                bitmap_idx: (decision.bitmap_idx + decision.num_test_vectors) as u32,
-                num_conditions,
-            });
-            let span = decision.span;
-            mappings.extend(std::iter::once(Mapping { kind, span }).chain(conditions.into_iter()));
-        } else {
-            mappings.extend(conditions.into_iter().map(|mapping| {
-                let MappingKind::MCDCBranch { true_term, false_term, mcdc_params: _ } =
-                    mapping.kind
-                else {
-                    unreachable!("all mappings here are MCDCBranch as shown above");
-                };
-                Mapping { kind: MappingKind::Branch { true_term, false_term }, span: mapping.span }
-            }))
-        }
+        // LLVM requires end index for counter mapping regions.
+        let kind = MappingKind::MCDCDecision(DecisionInfo {
+            bitmap_idx: (decision.bitmap_idx + decision.num_test_vectors) as u32,
+            num_conditions: u16::try_from(conditions.len()).unwrap(),
+        });
+        let span = decision.span;
+        mappings.extend(std::iter::once(Mapping { kind, span }).chain(conditions.into_iter()));
     }
 
     mappings
@@ -239,14 +236,8 @@ fn inject_coverage_statements<'tcx>(
     coverage_counters: &CoverageCounters,
 ) {
     // Inject counter-increment statements into MIR.
-    for (id, site) in coverage_counters.counter_increment_sites() {
-        // Determine the block to inject a counter-increment statement into.
-        // For BCB nodes this is just their first block, but for edges we need
-        // to create a new block between the two BCBs, and inject into that.
-        let target_bb = match site {
-            Site::Node { bcb } => graph[bcb].leader_bb(),
-        };
-
+    for (id, bcb) in coverage_counters.counter_increment_sites() {
+        let target_bb = graph[bcb].leader_bb();
         inject_statement(mir_body, CoverageKind::CounterIncrement { id }, target_bb);
     }
 

@@ -303,7 +303,7 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
                     hir::Mutability::Not => this.as_read_only_place(block, arg),
                     hir::Mutability::Mut => this.as_place(block, arg),
                 };
-                let address_of = Rvalue::RawPtr(mutability, unpack!(block = place));
+                let address_of = Rvalue::RawPtr(mutability.into(), unpack!(block = place));
                 this.cfg.push_assign(block, source_info, destination, address_of);
                 block.unit()
             }
@@ -554,7 +554,9 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             ExprKind::VarRef { .. }
             | ExprKind::UpvarRef { .. }
             | ExprKind::PlaceTypeAscription { .. }
-            | ExprKind::ValueTypeAscription { .. } => {
+            | ExprKind::ValueTypeAscription { .. }
+            | ExprKind::PlaceUnwrapUnsafeBinder { .. }
+            | ExprKind::ValueUnwrapUnsafeBinder { .. } => {
                 debug_assert!(Category::of(&expr.kind) == Some(Category::Place));
 
                 let place = unpack!(block = this.as_place(block, expr_id));
@@ -613,7 +615,8 @@ impl<'a, 'tcx> Builder<'a, 'tcx> {
             | ExprKind::ConstParam { .. }
             | ExprKind::ThreadLocalRef(_)
             | ExprKind::StaticRef { .. }
-            | ExprKind::OffsetOf { .. } => {
+            | ExprKind::OffsetOf { .. }
+            | ExprKind::WrapUnsafeBinder { .. } => {
                 debug_assert!(match Category::of(&expr.kind).unwrap() {
                     // should be handled above
                     Category::Rvalue(RvalueFunc::Into) => false,

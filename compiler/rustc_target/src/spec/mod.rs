@@ -1114,6 +1114,33 @@ impl ToJson for FloatAbi {
     }
 }
 
+/// The Rustc-specific variant of the ABI used for this target.
+#[derive(Clone, Copy, PartialEq, Hash, Debug)]
+pub enum RustcAbi {
+    /// On x86-32/64 only: do not use any FPU or SIMD registers for the ABI.
+    X86Softfloat,
+}
+
+impl FromStr for RustcAbi {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<RustcAbi, ()> {
+        Ok(match s {
+            "x86-softfloat" => RustcAbi::X86Softfloat,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl ToJson for RustcAbi {
+    fn to_json(&self) -> Json {
+        match *self {
+            RustcAbi::X86Softfloat => "x86-softfloat",
+        }
+        .to_json()
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
 pub enum TlsModel {
     GeneralDynamic,
@@ -1853,6 +1880,8 @@ supported_targets! {
 
     ("armv7a-none-eabi", armv7a_none_eabi),
     ("armv7a-none-eabihf", armv7a_none_eabihf),
+    ("armv7a-nuttx-eabi", armv7a_nuttx_eabi),
+    ("armv7a-nuttx-eabihf", armv7a_nuttx_eabihf),
 
     ("msp430-none-elf", msp430_none_elf),
 
@@ -1896,6 +1925,7 @@ supported_targets! {
 
     ("aarch64-unknown-none", aarch64_unknown_none),
     ("aarch64-unknown-none-softfloat", aarch64_unknown_none_softfloat),
+    ("aarch64-unknown-nuttx", aarch64_unknown_nuttx),
 
     ("x86_64-fortanix-unknown-sgx", x86_64_fortanix_unknown_sgx),
 
@@ -1960,7 +1990,11 @@ supported_targets! {
 
     ("aarch64-unknown-nto-qnx700", aarch64_unknown_nto_qnx700),
     ("aarch64-unknown-nto-qnx710", aarch64_unknown_nto_qnx710),
+    ("aarch64-unknown-nto-qnx710_iosock", aarch64_unknown_nto_qnx710_iosock),
+    ("aarch64-unknown-nto-qnx800", aarch64_unknown_nto_qnx800),
     ("x86_64-pc-nto-qnx710", x86_64_pc_nto_qnx710),
+    ("x86_64-pc-nto-qnx710_iosock", x86_64_pc_nto_qnx710_iosock),
+    ("x86_64-pc-nto-qnx800", x86_64_pc_nto_qnx800),
     ("i586-pc-nto-qnx700", i586_pc_nto_qnx700),
 
     ("aarch64-unknown-linux-ohos", aarch64_unknown_linux_ohos),
@@ -1971,6 +2005,8 @@ supported_targets! {
     ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
 
     ("thumbv6m-nuttx-eabi", thumbv6m_nuttx_eabi),
+    ("thumbv7a-nuttx-eabi", thumbv7a_nuttx_eabi),
+    ("thumbv7a-nuttx-eabihf", thumbv7a_nuttx_eabihf),
     ("thumbv7m-nuttx-eabi", thumbv7m_nuttx_eabi),
     ("thumbv7em-nuttx-eabi", thumbv7em_nuttx_eabi),
     ("thumbv7em-nuttx-eabihf", thumbv7em_nuttx_eabihf),
@@ -2245,6 +2281,9 @@ pub struct TargetOptions {
     /// Default CPU to pass to LLVM. Corresponds to `llc -mcpu=$cpu`. Defaults
     /// to "generic".
     pub cpu: StaticCow<str>,
+    /// Whether a cpu needs to be explicitly set.
+    /// Set to true if there is no default cpu. Defaults to false.
+    pub need_explicit_cpu: bool,
     /// Default target features to pass to LLVM. These features overwrite
     /// `-Ctarget-cpu` but can be overwritten with `-Ctarget-features`.
     /// Corresponds to `llc -mattr=$features`.
@@ -2493,6 +2532,12 @@ pub struct TargetOptions {
     /// If not provided, LLVM will infer the float ABI from the target triple (`llvm_target`).
     pub llvm_floatabi: Option<FloatAbi>,
 
+    /// Picks a specific ABI for this target. This is *not* just for "Rust" ABI functions,
+    /// it can also affect "C" ABI functions; the point is that this flag is interpreted by
+    /// rustc and not forwarded to LLVM.
+    /// So far, this is only used on x86.
+    pub rustc_abi: Option<RustcAbi>,
+
     /// Whether or not RelaxElfRelocation flag will be passed to the linker
     pub relax_elf_relocations: bool,
 
@@ -2652,10 +2697,6 @@ impl TargetOptions {
                 .collect();
         }
     }
-
-    pub(crate) fn has_feature(&self, search_feature: &str) -> bool {
-        self.features.split(',').any(|f| f.strip_prefix('+').is_some_and(|f| f == search_feature))
-    }
 }
 
 impl Default for TargetOptions {
@@ -2677,6 +2718,7 @@ impl Default for TargetOptions {
             link_script: None,
             asm_args: cvs![],
             cpu: "generic".into(),
+            need_explicit_cpu: false,
             features: "".into(),
             direct_access_external_data: None,
             dynamic_linking: false,
@@ -2761,6 +2803,7 @@ impl Default for TargetOptions {
             llvm_mcount_intrinsic: None,
             llvm_abiname: "".into(),
             llvm_floatabi: None,
+            rustc_abi: None,
             relax_elf_relocations: false,
             llvm_args: cvs![],
             use_ctors_section: false,
@@ -3225,6 +3268,17 @@ impl Target {
                 check!(self.llvm_floatabi.is_some(), "ARM targets must specify their float ABI",)
             }
             _ => {}
+        }
+
+        // Check consistency of Rust ABI declaration.
+        if let Some(rust_abi) = self.rustc_abi {
+            match rust_abi {
+                RustcAbi::X86Softfloat => check_matches!(
+                    &*self.arch,
+                    "x86" | "x86_64",
+                    "`x86-softfloat` ABI is only valid for x86 targets"
+                ),
+            }
         }
 
         // Check that the given target-features string makes some basic sense.

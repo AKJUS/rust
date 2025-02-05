@@ -33,7 +33,7 @@ use rustc_errors::{
 use rustc_hir::def::{CtorKind, DefKind};
 use rustc_hir::def_id::{CrateNum, DefId, LOCAL_CRATE, LocalDefId};
 use rustc_hir::definitions::Definitions;
-use rustc_hir::intravisit::Visitor;
+use rustc_hir::intravisit::VisitorExt;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir::{self as hir, Attribute, HirId, Node, TraitCandidate};
 use rustc_index::IndexVec;
@@ -52,7 +52,9 @@ use rustc_type_ir::TyKind::*;
 use rustc_type_ir::fold::TypeFoldable;
 use rustc_type_ir::lang_items::TraitSolverLangItem;
 pub use rustc_type_ir::lift::Lift;
-use rustc_type_ir::{CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo, search_graph};
+use rustc_type_ir::{
+    CollectAndApply, Interner, TypeFlags, WithCachedTypeInfo, elaborate, search_graph,
+};
 use tracing::{debug, instrument};
 
 use crate::arena::Arena;
@@ -140,10 +142,11 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
 
     type ParamConst = ty::ParamConst;
     type BoundConst = ty::BoundVar;
-    type ValueConst = ty::ValTree<'tcx>;
+    type ValueConst = ty::Value<'tcx>;
     type ExprConst = ty::Expr<'tcx>;
-    type Region = Region<'tcx>;
+    type ValTree = ty::ValTree<'tcx>;
 
+    type Region = Region<'tcx>;
     type EarlyParamRegion = ty::EarlyParamRegion;
     type LateParamRegion = ty::LateParamRegion;
     type BoundRegion = ty::BoundRegion;
@@ -341,6 +344,20 @@ impl<'tcx> Interner for TyCtxt<'tcx> {
         def_id: DefId,
     ) -> ty::EarlyBinder<'tcx, impl IntoIterator<Item = ty::Clause<'tcx>>> {
         self.item_bounds(def_id).map_bound(IntoIterator::into_iter)
+    }
+
+    fn item_self_bounds(
+        self,
+        def_id: DefId,
+    ) -> ty::EarlyBinder<'tcx, impl IntoIterator<Item = ty::Clause<'tcx>>> {
+        self.item_self_bounds(def_id).map_bound(IntoIterator::into_iter)
+    }
+
+    fn item_non_self_bounds(
+        self,
+        def_id: DefId,
+    ) -> ty::EarlyBinder<'tcx, impl IntoIterator<Item = ty::Clause<'tcx>>> {
+        self.item_non_self_bounds(def_id).map_bound(IntoIterator::into_iter)
     }
 
     fn predicates_of(
@@ -1102,15 +1119,18 @@ impl<'tcx> CommonConsts<'tcx> {
         };
 
         CommonConsts {
-            unit: mk_const(ty::ConstKind::Value(types.unit, ty::ValTree::zst())),
-            true_: mk_const(ty::ConstKind::Value(
-                types.bool,
-                ty::ValTree::Leaf(ty::ScalarInt::TRUE),
-            )),
-            false_: mk_const(ty::ConstKind::Value(
-                types.bool,
-                ty::ValTree::Leaf(ty::ScalarInt::FALSE),
-            )),
+            unit: mk_const(ty::ConstKind::Value(ty::Value {
+                ty: types.unit,
+                valtree: ty::ValTree::zst(),
+            })),
+            true_: mk_const(ty::ConstKind::Value(ty::Value {
+                ty: types.bool,
+                valtree: ty::ValTree::Leaf(ty::ScalarInt::TRUE),
+            })),
+            false_: mk_const(ty::ConstKind::Value(ty::Value {
+                ty: types.bool,
+                valtree: ty::ValTree::Leaf(ty::ScalarInt::FALSE),
+            })),
         }
     }
 }
@@ -1346,7 +1366,34 @@ pub struct GlobalCtxt<'tcx> {
     pub data_layout: TargetDataLayout,
 
     /// Stores memory for globals (statics/consts).
-    pub(crate) alloc_map: Lock<interpret::AllocMap<'tcx>>,
+    pub(crate) alloc_map: interpret::AllocMap<'tcx>,
+
+    current_gcx: CurrentGcx,
+}
+
+impl<'tcx> GlobalCtxt<'tcx> {
+    /// Installs `self` in a `TyCtxt` and `ImplicitCtxt` for the duration of
+    /// `f`.
+    pub fn enter<F, R>(&'tcx self, f: F) -> R
+    where
+        F: FnOnce(TyCtxt<'tcx>) -> R,
+    {
+        let icx = tls::ImplicitCtxt::new(self);
+
+        // Reset `current_gcx` to `None` when we exit.
+        let _on_drop = defer(move || {
+            *self.current_gcx.value.write() = None;
+        });
+
+        // Set this `GlobalCtxt` as the current one.
+        {
+            let mut guard = self.current_gcx.value.write();
+            assert!(guard.is_none(), "no `GlobalCtxt` is currently set");
+            *guard = Some(self as *const _ as *const ());
+        }
+
+        tls::enter_context(&icx, || f(icx.tcx))
+    }
 }
 
 /// This is used to get a reference to a `GlobalCtxt` if one is available.
@@ -1536,24 +1583,12 @@ impl<'tcx> TyCtxt<'tcx> {
             new_solver_evaluation_cache: Default::default(),
             canonical_param_env_cache: Default::default(),
             data_layout,
-            alloc_map: Lock::new(interpret::AllocMap::new()),
+            alloc_map: interpret::AllocMap::new(),
+            current_gcx,
         });
 
-        let icx = tls::ImplicitCtxt::new(&gcx);
-
-        // Reset `current_gcx` to `None` when we exit.
-        let _on_drop = defer(|| {
-            *current_gcx.value.write() = None;
-        });
-
-        // Set this `GlobalCtxt` as the current one.
-        {
-            let mut guard = current_gcx.value.write();
-            assert!(guard.is_none(), "no `GlobalCtxt` is currently set");
-            *guard = Some(&gcx as *const _ as *const ());
-        }
-
-        tls::enter_context(&icx, || f(icx.tcx))
+        // This is a separate function to work around a crash with parallel rustc (#135870)
+        gcx.enter(f)
     }
 
     /// Obtain all lang items of this crate and all dependencies (recursively)
@@ -1922,7 +1957,7 @@ impl<'tcx> TyCtxt<'tcx> {
     ) -> &'tcx rustc_hir::def_path_hash_map::DefPathHashMap {
         // Create a dependency to the crate to be sure we re-execute this when the amount of
         // definitions change.
-        self.ensure().hir_crate(());
+        self.ensure_ok().hir_crate(());
         // Freeze definitions once we start iterating on them, to prevent adding new ones
         // while iterating. If some query needs to add definitions, it should be `ensure`d above.
         self.untracked.definitions.freeze().def_path_hash_to_def_index_map()
@@ -2026,7 +2061,7 @@ impl<'tcx> TyCtxt<'tcx> {
         };
 
         let mut v = TraitObjectVisitor(vec![], self.hir());
-        v.visit_ty(hir_output);
+        v.visit_ty_unambig(hir_output);
         v.0
     }
 
@@ -2048,7 +2083,7 @@ impl<'tcx> TyCtxt<'tcx> {
             && let Some(alias_ty) = self.hir_node_by_def_id(local_id).alias_ty() // it is type alias
             && let Some(alias_generics) = self.hir_node_by_def_id(local_id).generics()
         {
-            v.visit_ty(alias_ty);
+            v.visit_ty_unambig(alias_ty);
             if !v.0.is_empty() {
                 return Some((
                     v.0,
@@ -2323,51 +2358,41 @@ macro_rules! sty_debug_print {
 }
 
 impl<'tcx> TyCtxt<'tcx> {
-    pub fn debug_stats(self) -> impl std::fmt::Debug + 'tcx {
-        struct DebugStats<'tcx>(TyCtxt<'tcx>);
+    pub fn debug_stats(self) -> impl fmt::Debug + 'tcx {
+        fmt::from_fn(move |fmt| {
+            sty_debug_print!(
+                fmt,
+                self,
+                Adt,
+                Array,
+                Slice,
+                RawPtr,
+                Ref,
+                FnDef,
+                FnPtr,
+                UnsafeBinder,
+                Placeholder,
+                Coroutine,
+                CoroutineWitness,
+                Dynamic,
+                Closure,
+                CoroutineClosure,
+                Tuple,
+                Bound,
+                Param,
+                Infer,
+                Alias,
+                Pat,
+                Foreign
+            )?;
 
-        impl<'tcx> std::fmt::Debug for DebugStats<'tcx> {
-            fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                sty_debug_print!(
-                    fmt,
-                    self.0,
-                    Adt,
-                    Array,
-                    Slice,
-                    RawPtr,
-                    Ref,
-                    FnDef,
-                    FnPtr,
-                    UnsafeBinder,
-                    Placeholder,
-                    Coroutine,
-                    CoroutineWitness,
-                    Dynamic,
-                    Closure,
-                    CoroutineClosure,
-                    Tuple,
-                    Bound,
-                    Param,
-                    Infer,
-                    Alias,
-                    Pat,
-                    Foreign
-                )?;
+            writeln!(fmt, "GenericArgs interner: #{}", self.interners.args.len())?;
+            writeln!(fmt, "Region interner: #{}", self.interners.region.len())?;
+            writeln!(fmt, "Const Allocation interner: #{}", self.interners.const_allocation.len())?;
+            writeln!(fmt, "Layout interner: #{}", self.interners.layout.len())?;
 
-                writeln!(fmt, "GenericArgs interner: #{}", self.0.interners.args.len())?;
-                writeln!(fmt, "Region interner: #{}", self.0.interners.region.len())?;
-                writeln!(
-                    fmt,
-                    "Const Allocation interner: #{}",
-                    self.0.interners.const_allocation.len()
-                )?;
-                writeln!(fmt, "Layout interner: #{}", self.0.interners.layout.len())?;
-
-                Ok(())
-            }
-        }
-
-        DebugStats(self)
+            Ok(())
+        })
     }
 }
 
@@ -2558,7 +2583,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Given the def_id of a Trait `trait_def_id` and the name of an associated item `assoc_name`
     /// returns true if the `trait_def_id` defines an associated item of name `assoc_name`.
     pub fn trait_may_define_assoc_item(self, trait_def_id: DefId, assoc_name: Ident) -> bool {
-        self.supertrait_def_ids(trait_def_id).any(|trait_did| {
+        elaborate::supertrait_def_ids(self, trait_def_id).any(|trait_did| {
             self.associated_items(trait_did)
                 .filter_by_name_unhygienic(assoc_name.name)
                 .any(|item| self.hygienic_eq(assoc_name, item.ident(self), trait_did))
@@ -2570,21 +2595,13 @@ impl<'tcx> TyCtxt<'tcx> {
         let ty::Alias(ty::Opaque, ty::AliasTy { def_id, .. }) = ty.kind() else { return false };
         let future_trait = self.require_lang_item(LangItem::Future, None);
 
-        self.explicit_item_super_predicates(def_id).skip_binder().iter().any(|&(predicate, _)| {
+        self.explicit_item_self_bounds(def_id).skip_binder().iter().any(|&(predicate, _)| {
             let ty::ClauseKind::Trait(trait_predicate) = predicate.kind().skip_binder() else {
                 return false;
             };
             trait_predicate.trait_ref.def_id == future_trait
                 && trait_predicate.polarity == PredicatePolarity::Positive
         })
-    }
-
-    /// Computes the def-ids of the transitive supertraits of `trait_def_id`. This (intentionally)
-    /// does not compute the full elaborated super-predicates but just the set of def-ids. It is used
-    /// to identify which traits may define a given associated type to help avoid cycle errors,
-    /// and to make size estimates for vtable layout computation.
-    pub fn supertrait_def_ids(self, trait_def_id: DefId) -> impl Iterator<Item = DefId> + 'tcx {
-        rustc_type_ir::elaborate::supertrait_def_ids(self, trait_def_id)
     }
 
     /// Given a closure signature, returns an equivalent fn signature. Detuples

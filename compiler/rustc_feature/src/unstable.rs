@@ -272,7 +272,7 @@ declare_features! (
     (unstable, doc_notable_trait, "1.52.0", Some(45040)),
     /// Allows using the `may_dangle` attribute (RFC 1327).
     (unstable, dropck_eyepatch, "1.10.0", Some(34761)),
-    /// Allows making `dyn Trait` well-formed even if `Trait` is not dyn-compatible[^1].
+    /// Allows making `dyn Trait` well-formed even if `Trait` is not dyn compatible[^1].
     /// In that case, `dyn Trait: Trait` does not hold. Moreover, coercions and
     /// casts in safe Rust to `dyn Trait` for such a `Trait` is also forbidden.
     ///
@@ -300,8 +300,6 @@ declare_features! (
     (internal, rustdoc_internals, "1.58.0", Some(90418)),
     /// Allows using the `rustdoc::missing_doc_code_examples` lint
     (unstable, rustdoc_missing_doc_code_examples, "1.31.0", Some(101730)),
-    /// Allows using `#[start]` on a function indicating that it is the program entrypoint.
-    (unstable, start, "1.0.0", Some(29633)),
     /// Allows using `#[structural_match]` which indicates that a type is structurally matchable.
     /// FIXME: Subsumed by trait `StructuralPartialEq`, cannot move to removed until a library
     /// feature with the same name exists.
@@ -531,6 +529,8 @@ declare_features! (
     (unstable, inline_const_pat, "1.58.0", Some(76001)),
     /// Allows using `pointer` and `reference` in intra-doc links
     (unstable, intra_doc_pointers, "1.51.0", Some(80896)),
+    // Allows using the `kl` and `widekl` target features and the associated intrinsics
+    (unstable, keylocker_x86, "CURRENT_RUSTC_VERSION", Some(134813)),
     // Allows setting the threshold for the `large_assignments` lint.
     (unstable, large_assignments, "1.52.0", Some(83518)),
     /// Allow to have type alias types for inter-crate use.
@@ -570,6 +570,8 @@ declare_features! (
     (unstable, never_type, "1.13.0", Some(35121)),
     /// Allows diverging expressions to fall back to `!` rather than `()`.
     (unstable, never_type_fallback, "1.41.0", Some(65992)),
+    /// Switch `..` syntax to use the new (`Copy + IntoIterator`) range types.
+    (unstable, new_range, "CURRENT_RUSTC_VERSION", Some(123741)),
     /// Allows `#![no_core]`.
     (unstable, no_core, "1.3.0", Some(29639)),
     /// Allows the use of `no_sanitize` attribute.
@@ -722,7 +724,8 @@ impl Features {
 
 /// Some features are not allowed to be used together at the same time, if
 /// the two are present, produce an error.
-///
-/// Currently empty, but we will probably need this again in the future,
-/// so let's keep it in for now.
-pub const INCOMPATIBLE_FEATURES: &[(Symbol, Symbol)] = &[];
+pub const INCOMPATIBLE_FEATURES: &[(Symbol, Symbol)] = &[
+    // Experimental match ergonomics rulesets are incompatible with each other, to simplify the
+    // boolean logic required to tell which typing rules to use.
+    (sym::ref_pat_eat_one_layer_2024, sym::ref_pat_eat_one_layer_2024_structural),
+];

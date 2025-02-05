@@ -6,10 +6,9 @@ use hir::def_id::{DefId, DefIdMap, LocalDefId};
 use rustc_data_structures::fx::{FxHashSet, FxIndexMap, FxIndexSet};
 use rustc_errors::codes::*;
 use rustc_errors::{Applicability, ErrorGuaranteed, pluralize, struct_span_code_err};
-use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
-use rustc_hir::{GenericParamKind, ImplItemKind, intravisit};
-use rustc_infer::infer::outlives::env::OutlivesEnvironment;
+use rustc_hir::intravisit::VisitorExt;
+use rustc_hir::{self as hir, AmbigArg, GenericParamKind, ImplItemKind, intravisit};
 use rustc_infer::infer::{self, InferCtxt, TyCtxtInferExt};
 use rustc_infer::traits::util;
 use rustc_middle::ty::error::{ExpectedFound, TypeError};
@@ -24,7 +23,6 @@ use rustc_span::Span;
 use rustc_trait_selection::error_reporting::InferCtxtErrorExt;
 use rustc_trait_selection::infer::InferCtxtExt;
 use rustc_trait_selection::regions::InferCtxtRegionExt;
-use rustc_trait_selection::traits::outlives_bounds::InferCtxtExt as _;
 use rustc_trait_selection::traits::{
     self, FulfillmentError, ObligationCause, ObligationCauseCode, ObligationCtxt,
 };
@@ -416,11 +414,7 @@ fn compare_method_predicate_entailment<'tcx>(
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
-    let outlives_env = OutlivesEnvironment::with_bounds(
-        param_env,
-        infcx.implied_bounds_tys(param_env, impl_m_def_id, &wf_tys),
-    );
-    let errors = infcx.resolve_regions(&outlives_env);
+    let errors = infcx.resolve_regions(impl_m_def_id, param_env, wf_tys);
     if !errors.is_empty() {
         return Err(infcx
             .tainted_by_errors()
@@ -430,12 +424,12 @@ fn compare_method_predicate_entailment<'tcx>(
     Ok(())
 }
 
-struct RemapLateParam<'a, 'tcx> {
+struct RemapLateParam<'tcx> {
     tcx: TyCtxt<'tcx>,
-    mapping: &'a FxIndexMap<ty::LateParamRegionKind, ty::LateParamRegionKind>,
+    mapping: FxIndexMap<ty::LateParamRegionKind, ty::LateParamRegionKind>,
 }
 
-impl<'tcx> TypeFolder<TyCtxt<'tcx>> for RemapLateParam<'_, 'tcx> {
+impl<'tcx> TypeFolder<TyCtxt<'tcx>> for RemapLateParam<'tcx> {
     fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
@@ -659,6 +653,7 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
                 }))),
                 terr,
                 false,
+                None,
             );
             return Err(diag.emit());
         }
@@ -725,11 +720,7 @@ pub(super) fn collect_return_position_impl_trait_in_trait_tys<'tcx>(
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
-    let outlives_env = OutlivesEnvironment::with_bounds(
-        param_env,
-        infcx.implied_bounds_tys(param_env, impl_m_def_id, &wf_tys),
-    );
-    ocx.resolve_regions_and_report_errors(impl_m_def_id, &outlives_env)?;
+    ocx.resolve_regions_and_report_errors(impl_m_def_id, param_env, wf_tys)?;
 
     let mut remapped_types = DefIdMap::default();
     for (def_id, (ty, args)) in collected_types {
@@ -1080,6 +1071,7 @@ fn report_trait_method_mismatch<'tcx>(
         }))),
         terr,
         false,
+        None,
     );
 
     diag.emit()
@@ -1610,7 +1602,7 @@ fn compare_synthetic_generics<'tcx>(
                     struct Visitor(hir::def_id::LocalDefId);
                     impl<'v> intravisit::Visitor<'v> for Visitor {
                         type Result = ControlFlow<Span>;
-                        fn visit_ty(&mut self, ty: &'v hir::Ty<'v>) -> Self::Result {
+                        fn visit_ty(&mut self, ty: &'v hir::Ty<'v, AmbigArg>) -> Self::Result {
                             if let hir::TyKind::Path(hir::QPath::Resolved(None, path)) = ty.kind
                                 && let Res::Def(DefKind::TyParam, def_id) = path.res
                                 && def_id == self.0.to_def_id()
@@ -1622,9 +1614,9 @@ fn compare_synthetic_generics<'tcx>(
                         }
                     }
 
-                    let span = input_tys.iter().find_map(|ty| {
-                        intravisit::Visitor::visit_ty(&mut Visitor(impl_def_id), ty).break_value()
-                    })?;
+                    let span = input_tys
+                        .iter()
+                        .find_map(|ty| Visitor(impl_def_id).visit_ty_unambig(ty).break_value())?;
 
                     let bounds = impl_m.generics.bounds_for_param(impl_def_id).next()?.bounds;
                     let bounds = bounds.first()?.span().to(bounds.last()?.span());
@@ -1872,6 +1864,7 @@ fn compare_const_predicate_entailment<'tcx>(
             }))),
             terr,
             false,
+            None,
         );
         return Err(diag.emit());
     };
@@ -1883,8 +1876,7 @@ fn compare_const_predicate_entailment<'tcx>(
         return Err(infcx.err_ctxt().report_fulfillment_errors(errors));
     }
 
-    let outlives_env = OutlivesEnvironment::new(param_env);
-    ocx.resolve_regions_and_report_errors(impl_ct_def_id, &outlives_env)
+    ocx.resolve_regions_and_report_errors(impl_ct_def_id, param_env, [])
 }
 
 #[instrument(level = "debug", skip(tcx))]
@@ -2017,8 +2009,7 @@ fn compare_type_predicate_entailment<'tcx>(
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
-    let outlives_env = OutlivesEnvironment::new(param_env);
-    ocx.resolve_regions_and_report_errors(impl_ty_def_id, &outlives_env)
+    ocx.resolve_regions_and_report_errors(impl_ty_def_id, param_env, [])
 }
 
 /// Validate that `ProjectionCandidate`s created for this associated type will
@@ -2043,7 +2034,7 @@ pub(super) fn check_type_bounds<'tcx>(
 ) -> Result<(), ErrorGuaranteed> {
     // Avoid bogus "type annotations needed `Foo: Bar`" errors on `impl Bar for Foo` in case
     // other `Foo` impls are incoherent.
-    tcx.ensure().coherent_trait(impl_trait_ref.def_id)?;
+    tcx.ensure_ok().coherent_trait(impl_trait_ref.def_id)?;
 
     let param_env = tcx.param_env(impl_ty.def_id);
     debug!(?param_env);
@@ -2147,9 +2138,7 @@ pub(super) fn check_type_bounds<'tcx>(
 
     // Finally, resolve all regions. This catches wily misuses of
     // lifetime parameters.
-    let implied_bounds = infcx.implied_bounds_tys(param_env, impl_ty_def_id, &assumed_wf_types);
-    let outlives_env = OutlivesEnvironment::with_bounds(param_env, implied_bounds);
-    ocx.resolve_regions_and_report_errors(impl_ty_def_id, &outlives_env)
+    ocx.resolve_regions_and_report_errors(impl_ty_def_id, param_env, assumed_wf_types)
 }
 
 struct ReplaceTy<'tcx> {
@@ -2362,7 +2351,7 @@ fn try_report_async_mismatch<'tcx>(
             // the right span is a bit difficult.
             return Err(tcx.sess.dcx().emit_err(MethodShouldReturnFuture {
                 span: tcx.def_span(impl_m.def_id),
-                method_name: trait_m.name,
+                method_name: tcx.item_ident(impl_m.def_id),
                 trait_item_span: tcx.hir().span_if_local(trait_m.def_id),
             }));
         }

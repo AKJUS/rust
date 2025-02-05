@@ -114,6 +114,9 @@ pub struct ImportPathConfig {
     pub prefer_prelude: bool,
     /// If true, prefer abs path (starting with `::`) where it is available.
     pub prefer_absolute: bool,
+    /// If true, paths containing `#[unstable]` segments may be returned, but only if if there is no
+    /// stable path. This does not check, whether the item itself that is being imported is `#[unstable]`.
+    pub allow_unstable: bool,
 }
 
 #[derive(Debug)]
@@ -502,7 +505,7 @@ impl ModuleId {
     }
 
     /// Whether this module represents the crate root module
-    fn is_crate_root(&self) -> bool {
+    pub fn is_crate_root(&self) -> bool {
         self.local_id == DefMap::ROOT && self.block.is_none()
     }
 }
@@ -910,6 +913,7 @@ pub enum AssocItemId {
     ConstId(ConstId),
     TypeAliasId(TypeAliasId),
 }
+
 // FIXME: not every function, ... is actually an assoc item. maybe we should make
 // sure that you can only turn actual assoc items into AssocItemIds. This would
 // require not implementing From, and instead having some checked way of

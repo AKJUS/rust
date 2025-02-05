@@ -1958,7 +1958,7 @@ impl<'a> Parser<'a> {
         } else {
             let err = self.dcx().create_err(errors::UnknownBuiltinConstruct {
                 span: lo.to(ident.span),
-                name: ident.name,
+                name: ident,
             });
             return Err(err);
         };
@@ -2095,7 +2095,7 @@ impl<'a> Parser<'a> {
                     // point literal here, since there's no use of the exponent
                     // syntax that also constitutes a valid integer, so we need
                     // not check for that.
-                    if suffix.map_or(true, |s| s == sym::f32 || s == sym::f64)
+                    if suffix.is_none_or(|s| s == sym::f32 || s == sym::f64)
                         && symbol.as_str().chars().all(|c| c.is_numeric() || c == '_')
                         && self.token.span.hi() == next_token.span.lo()
                     {
@@ -3114,9 +3114,8 @@ impl<'a> Parser<'a> {
             let span_before_body = this.prev_token.span;
             let arm_body;
             let is_fat_arrow = this.check(exp!(FatArrow));
-            let is_almost_fat_arrow = TokenKind::FatArrow
-                .similar_tokens()
-                .is_some_and(|similar_tokens| similar_tokens.contains(&this.token.kind));
+            let is_almost_fat_arrow =
+                TokenKind::FatArrow.similar_tokens().contains(&this.token.kind);
 
             // this avoids the compiler saying that a `,` or `}` was expected even though
             // the pattern isn't a never pattern (and thus an arm body is required)

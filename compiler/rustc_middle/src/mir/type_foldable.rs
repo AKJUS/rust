@@ -1,6 +1,7 @@
 //! `TypeFoldable` implementations for MIR types
 
 use rustc_ast::InlineAsmTemplatePiece;
+use rustc_hir::UnsafeBinderCastKind;
 use rustc_hir::def_id::LocalDefId;
 
 use super::*;
@@ -15,11 +16,13 @@ TrivialTypeTraversalImpls! {
     SourceScopeLocalData,
     UserTypeAnnotationIndex,
     BorrowKind,
+    RawPtrKind,
     CastKind,
     BasicBlock,
     SwitchTargets,
     CoroutineKind,
     CoroutineSavedLocal,
+    UnsafeBinderCastKind,
 }
 
 TrivialTypeTraversalImpls! {

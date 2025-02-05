@@ -661,6 +661,79 @@ pub enum MemoryEffects {
     InaccessibleMemOnly,
 }
 
+/// LLVMOpcode
+#[derive(Copy, Clone, PartialEq, Eq)]
+#[repr(C)]
+pub enum Opcode {
+    Ret = 1,
+    Br = 2,
+    Switch = 3,
+    IndirectBr = 4,
+    Invoke = 5,
+    Unreachable = 7,
+    CallBr = 67,
+    FNeg = 66,
+    Add = 8,
+    FAdd = 9,
+    Sub = 10,
+    FSub = 11,
+    Mul = 12,
+    FMul = 13,
+    UDiv = 14,
+    SDiv = 15,
+    FDiv = 16,
+    URem = 17,
+    SRem = 18,
+    FRem = 19,
+    Shl = 20,
+    LShr = 21,
+    AShr = 22,
+    And = 23,
+    Or = 24,
+    Xor = 25,
+    Alloca = 26,
+    Load = 27,
+    Store = 28,
+    GetElementPtr = 29,
+    Trunc = 30,
+    ZExt = 31,
+    SExt = 32,
+    FPToUI = 33,
+    FPToSI = 34,
+    UIToFP = 35,
+    SIToFP = 36,
+    FPTrunc = 37,
+    FPExt = 38,
+    PtrToInt = 39,
+    IntToPtr = 40,
+    BitCast = 41,
+    AddrSpaceCast = 60,
+    ICmp = 42,
+    FCmp = 43,
+    PHI = 44,
+    Call = 45,
+    Select = 46,
+    UserOp1 = 47,
+    UserOp2 = 48,
+    VAArg = 49,
+    ExtractElement = 50,
+    InsertElement = 51,
+    ShuffleVector = 52,
+    ExtractValue = 53,
+    InsertValue = 54,
+    Freeze = 68,
+    Fence = 55,
+    AtomicCmpXchg = 56,
+    AtomicRMW = 57,
+    Resume = 58,
+    LandingPad = 59,
+    CleanupRet = 61,
+    CatchRet = 62,
+    CatchPad = 63,
+    CleanupPad = 64,
+    CatchSwitch = 65,
+}
+
 unsafe extern "C" {
     type Opaque;
 }
@@ -741,8 +814,11 @@ pub mod debuginfo {
     pub type DIEnumerator = DIDescriptor;
     pub type DITemplateTypeParameter = DIDescriptor;
 
-    // These values **must** match with LLVMRustDIFlags!!
     bitflags! {
+        /// Must match the layout of `LLVMDIFlags` in the LLVM-C API.
+        ///
+        /// Each value declared here must also be covered by the static
+        /// assertions in `RustWrapper.cpp` used by `fromRust(LLVMDIFlags)`.
         #[repr(transparent)]
         #[derive(Clone, Copy, Default)]
         pub struct DIFlags: u32 {
@@ -752,7 +828,7 @@ pub mod debuginfo {
             const FlagPublic              = 3;
             const FlagFwdDecl             = (1 << 2);
             const FlagAppleBlock          = (1 << 3);
-            const FlagBlockByrefStruct    = (1 << 4);
+            const FlagReservedBit4        = (1 << 4);
             const FlagVirtual             = (1 << 5);
             const FlagArtificial          = (1 << 6);
             const FlagExplicit            = (1 << 7);
@@ -763,10 +839,21 @@ pub mod debuginfo {
             const FlagStaticMember        = (1 << 12);
             const FlagLValueReference     = (1 << 13);
             const FlagRValueReference     = (1 << 14);
-            const FlagExternalTypeRef     = (1 << 15);
+            const FlagReserved            = (1 << 15);
+            const FlagSingleInheritance   = (1 << 16);
+            const FlagMultipleInheritance = (2 << 16);
+            const FlagVirtualInheritance  = (3 << 16);
             const FlagIntroducedVirtual   = (1 << 18);
             const FlagBitField            = (1 << 19);
             const FlagNoReturn            = (1 << 20);
+            // The bit at (1 << 21) is unused, but was `LLVMDIFlagMainSubprogram`.
+            const FlagTypePassByValue     = (1 << 22);
+            const FlagTypePassByReference = (1 << 23);
+            const FlagEnumClass           = (1 << 24);
+            const FlagThunk               = (1 << 25);
+            const FlagNonTrivial          = (1 << 26);
+            const FlagBigEndian           = (1 << 27);
+            const FlagLittleEndian        = (1 << 28);
         }
     }
 
@@ -918,6 +1005,7 @@ unsafe extern "C" {
     pub fn LLVMMetadataTypeInContext(C: &Context) -> &Type;
 
     // Operations on all values
+    pub fn LLVMIsUndef(Val: &Value) -> Bool;
     pub fn LLVMTypeOf(Val: &Value) -> &Type;
     pub fn LLVMGetValueName2(Val: &Value, Length: *mut size_t) -> *const c_char;
     pub fn LLVMSetValueName2(Val: &Value, Name: *const c_char, NameLen: size_t);
@@ -976,7 +1064,10 @@ unsafe extern "C" {
     pub fn LLVMConstPtrToInt<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub fn LLVMConstIntToPtr<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub fn LLVMConstBitCast<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
+    pub fn LLVMConstPointerCast<'a>(ConstantVal: &'a Value, ToType: &'a Type) -> &'a Value;
     pub fn LLVMGetAggregateElement(ConstantVal: &Value, Idx: c_uint) -> Option<&Value>;
+    pub fn LLVMGetConstOpcode(ConstantVal: &Value) -> Opcode;
+    pub fn LLVMIsAConstantExpr(Val: &Value) -> Option<&Value>;
 
     // Operations on global variables, functions, and aliases (globals)
     pub fn LLVMIsDeclaration(Global: &Value) -> Bool;
@@ -1033,6 +1124,7 @@ unsafe extern "C" {
     // Operations on instructions
     pub fn LLVMIsAInstruction(Val: &Value) -> Option<&Value>;
     pub fn LLVMGetFirstBasicBlock(Fn: &Value) -> &BasicBlock;
+    pub fn LLVMGetOperand(Val: &Value, Index: c_uint) -> Option<&Value>;
 
     // Operations on call sites
     pub fn LLVMSetInstructionCallConv(Instr: &Value, CC: c_uint);
@@ -1287,6 +1379,9 @@ unsafe extern "C" {
     pub fn LLVMBuildNeg<'a>(B: &Builder<'a>, V: &'a Value, Name: *const c_char) -> &'a Value;
     pub fn LLVMBuildFNeg<'a>(B: &Builder<'a>, V: &'a Value, Name: *const c_char) -> &'a Value;
     pub fn LLVMBuildNot<'a>(B: &Builder<'a>, V: &'a Value, Name: *const c_char) -> &'a Value;
+
+    // Extra flags on arithmetic
+    pub fn LLVMSetIsDisjoint(Instr: &Value, IsDisjoint: Bool);
 
     // Memory
     pub fn LLVMBuildAlloca<'a>(B: &Builder<'a>, Ty: &'a Type, Name: *const c_char) -> &'a Value;

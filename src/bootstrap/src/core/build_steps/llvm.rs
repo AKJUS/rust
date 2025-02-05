@@ -1295,7 +1295,9 @@ impl Step for CrtBeginEnd {
     }
 
     fn make_run(run: RunConfig<'_>) {
-        run.builder.ensure(CrtBeginEnd { target: run.target });
+        if run.target.needs_crt_begin_end() {
+            run.builder.ensure(CrtBeginEnd { target: run.target });
+        }
     }
 
     /// Build crtbegin.o/crtend.o for musl target.
@@ -1338,7 +1340,7 @@ impl Step for CrtBeginEnd {
             .file(crtbegin_src)
             .file(crtend_src);
 
-        // Those flags are defined in src/llvm-project/compiler-rt/lib/crt/CMakeLists.txt
+        // Those flags are defined in src/llvm-project/compiler-rt/lib/builtins/CMakeLists.txt
         // Currently only consumer of those objects is musl, which use .init_array/.fini_array
         // instead of .ctors/.dtors
         cfg.flag("-std=c11")

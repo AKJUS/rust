@@ -5,7 +5,7 @@ use hir::{ExpandResult, Semantics, Type, TypeInfo, Variant};
 use ide_db::{active_parameter::ActiveParameter, RootDatabase};
 use itertools::Either;
 use syntax::{
-    algo::{ancestors_at_offset, find_node_at_offset, non_trivia_sibling},
+    algo::{self, ancestors_at_offset, find_node_at_offset, non_trivia_sibling},
     ast::{
         self, AttrKind, HasArgList, HasGenericArgs, HasGenericParams, HasLoopBody, HasName,
         NameOrNameRef,
@@ -85,6 +85,11 @@ pub(super) fn expand_and_analyze(
     })
 }
 
+fn token_at_offset_ignore_whitespace(file: &SyntaxNode, offset: TextSize) -> Option<SyntaxToken> {
+    let token = file.token_at_offset(offset).left_biased()?;
+    algo::skip_whitespace_token(token, Direction::Prev)
+}
+
 /// Expand attributes and macro calls at the current cursor position for both the original file
 /// and fake file repeatedly. As soon as one of the two expansions fail we stop so the original
 /// and speculative states stay in sync.
@@ -123,10 +128,9 @@ fn expand(
 ) -> Option<ExpansionResult> {
     let _p = tracing::info_span!("CompletionContext::expand").entered();
 
+    // Left biased since there may already be an identifier token there, and we appended to it.
     if !sema.might_be_inside_macro_call(&fake_ident_token)
-        && original_file
-            .token_at_offset(original_offset + relative_offset)
-            .right_biased()
+        && token_at_offset_ignore_whitespace(&original_file, original_offset + relative_offset)
             .is_some_and(|original_token| !sema.might_be_inside_macro_call(&original_token))
     {
         // Recursion base case.
@@ -142,9 +146,11 @@ fn expand(
 
     let parent_item =
         |item: &ast::Item| item.syntax().ancestors().skip(1).find_map(ast::Item::cast);
+    let original_node = token_at_offset_ignore_whitespace(&original_file, original_offset)
+        .and_then(|token| token.parent_ancestors().find_map(ast::Item::cast));
     let ancestor_items = iter::successors(
         Option::zip(
-            find_node_at_offset::<ast::Item>(&original_file, original_offset),
+            original_node,
             find_node_at_offset::<ast::Item>(
                 &speculative_file,
                 fake_ident_token.text_range().start(),
@@ -1150,6 +1156,9 @@ fn classify_name_ref(
         let after_if_expr = after_if_expr(it.clone());
         let ref_expr_parent =
             path.as_single_name_ref().and_then(|_| it.parent()).and_then(ast::RefExpr::cast);
+        let after_amp = non_trivia_sibling(it.clone().into(), Direction::Prev)
+            .map(|it| it.kind() == SyntaxKind::AMP)
+            .unwrap_or(false);
         let (innermost_ret_ty, self_param) = {
             let find_ret_ty = |it: SyntaxNode| {
                 if let Some(item) = ast::Item::cast(it.clone()) {
@@ -1219,6 +1228,7 @@ fn classify_name_ref(
                 after_if_expr,
                 in_condition,
                 ref_expr_parent,
+                after_amp,
                 is_func_update,
                 innermost_ret_ty,
                 self_param,
@@ -1585,11 +1595,11 @@ fn pattern_context_for(
                                         }).map(|enum_| enum_.variants(sema.db))
                                     })
                                 }).map(|variants| variants.iter().filter_map(|variant| {
-                                        let variant_name = variant.name(sema.db).unescaped().display(sema.db).to_string();
+                                        let variant_name = variant.name(sema.db);
 
                                         let variant_already_present = match_arm_list.arms().any(|arm| {
                                             arm.pat().and_then(|pat| {
-                                                let pat_already_present = pat.syntax().to_string().contains(&variant_name);
+                                                let pat_already_present = pat.syntax().to_string().contains(variant_name.as_str());
                                                 pat_already_present.then_some(pat_already_present)
                                             }).is_some()
                                         });

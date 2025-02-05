@@ -189,7 +189,7 @@ pub struct Session {
     /// enabled. Makes it so that "please report a bug" is hidden, as ICEs with
     /// internal features are wontfix, and they are usually the cause of the ICEs.
     /// None signifies that this is not tracked.
-    pub using_internal_features: Arc<AtomicBool>,
+    pub using_internal_features: &'static AtomicBool,
 
     /// All commandline args used to invoke the compiler, with @file args fully expanded.
     /// This will only be used within debug info, e.g. in the pdb file on windows
@@ -732,6 +732,11 @@ impl Session {
         self.opts.cg.split_debuginfo.unwrap_or(self.target.split_debuginfo)
     }
 
+    /// Returns the DWARF version passed on the CLI or the default for the target.
+    pub fn dwarf_version(&self) -> u32 {
+        self.opts.unstable_opts.dwarf_version.unwrap_or(self.target.default_dwarf_version)
+    }
+
     pub fn stack_protector(&self) -> StackProtector {
         if self.target.options.supports_stack_protector {
             self.opts.unstable_opts.stack_protector
@@ -895,13 +900,16 @@ fn default_emitter(
         }
         t => t,
     };
+
+    let source_map = if sopts.unstable_opts.link_only { None } else { Some(source_map) };
+
     match sopts.error_format {
         config::ErrorOutputType::HumanReadable(kind, color_config) => {
             let short = kind.short();
 
             if let HumanReadableErrorType::AnnotateSnippet = kind {
                 let emitter = AnnotateSnippetEmitter::new(
-                    Some(source_map),
+                    source_map,
                     bundle,
                     fallback_bundle,
                     short,
@@ -911,7 +919,7 @@ fn default_emitter(
             } else {
                 let emitter = HumanEmitter::new(stderr_destination(color_config), fallback_bundle)
                     .fluent_bundle(bundle)
-                    .sm(Some(source_map))
+                    .sm(source_map)
                     .short_message(short)
                     .teach(sopts.unstable_opts.teach)
                     .diagnostic_width(sopts.diagnostic_width)
@@ -966,7 +974,7 @@ pub fn build_session(
     sysroot: PathBuf,
     cfg_version: &'static str,
     ice_file: Option<PathBuf>,
-    using_internal_features: Arc<AtomicBool>,
+    using_internal_features: &'static AtomicBool,
     expanded_args: Vec<String>,
 ) -> Session {
     // FIXME: This is not general enough to make the warning lint completely override
@@ -1260,8 +1268,7 @@ fn validate_commandline_args_with_session_available(sess: &Session) {
     }
 
     if sess.opts.unstable_opts.embed_source {
-        let dwarf_version =
-            sess.opts.unstable_opts.dwarf_version.unwrap_or(sess.target.default_dwarf_version);
+        let dwarf_version = sess.dwarf_version();
 
         if dwarf_version < 5 {
             sess.dcx().emit_warn(errors::EmbedSourceInsufficientDwarfVersion { dwarf_version });
@@ -1355,12 +1362,6 @@ pub struct EarlyDiagCtxt {
     dcx: DiagCtxt,
 }
 
-impl Default for EarlyDiagCtxt {
-    fn default() -> Self {
-        Self::new(ErrorOutputType::default())
-    }
-}
-
 impl EarlyDiagCtxt {
     pub fn new(output: ErrorOutputType) -> Self {
         let emitter = mk_emitter(output);
@@ -1368,10 +1369,9 @@ impl EarlyDiagCtxt {
     }
 
     /// Swap out the underlying dcx once we acquire the user's preference on error emission
-    /// format. Any errors prior to that will cause an abort and all stashed diagnostics of the
-    /// previous dcx will be emitted.
-    pub fn abort_if_error_and_set_error_format(&mut self, output: ErrorOutputType) {
-        self.dcx.handle().abort_if_errors();
+    /// format. If `early_err` was previously called this will panic.
+    pub fn set_error_format(&mut self, output: ErrorOutputType) {
+        assert!(self.dcx.handle().has_errors().is_none());
 
         let emitter = mk_emitter(output);
         self.dcx = DiagCtxt::new(emitter);
@@ -1391,7 +1391,7 @@ impl EarlyDiagCtxt {
 
     #[allow(rustc::untranslatable_diagnostic)]
     #[allow(rustc::diagnostic_outside_of_impl)]
-    #[must_use = "ErrorGuaranteed must be returned from `run_compiler` in order to exit with a non-zero status code"]
+    #[must_use = "raise_fatal must be called on the returned ErrorGuaranteed in order to exit with a non-zero status code"]
     pub fn early_err(&self, msg: impl Into<DiagMessage>) -> ErrorGuaranteed {
         self.dcx.handle().err(msg)
     }
@@ -1442,7 +1442,7 @@ fn mk_emitter(output: ErrorOutputType) -> Box<DynEmitter> {
         config::ErrorOutputType::Json { pretty, json_rendered, color_config } => {
             Box::new(JsonEmitter::new(
                 Box::new(io::BufWriter::new(io::stderr())),
-                Lrc::new(SourceMap::new(FilePathMapping::empty())),
+                Some(Lrc::new(SourceMap::new(FilePathMapping::empty()))),
                 fallback_bundle,
                 pretty,
                 json_rendered,

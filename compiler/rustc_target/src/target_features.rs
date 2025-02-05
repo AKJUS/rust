@@ -5,7 +5,7 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
 use rustc_span::{Symbol, sym};
 
-use crate::spec::{FloatAbi, Target};
+use crate::spec::{FloatAbi, RustcAbi, Target};
 
 /// Features that control behaviour of rustc, rather than the codegen.
 /// These exist globally and are not in the target-specific lists below.
@@ -108,21 +108,19 @@ impl Stability {
 // per-function level, since we would then allow safe calls from functions with `+soft-float` to
 // functions without that feature!
 //
-// It is important for soundness that features allowed here do *not* change the function call ABI.
-// For example, disabling the `x87` feature on x86 changes how scalar floats are passed as
-// arguments, so enabling toggling that feature would be unsound. In fact, since `-Ctarget-feature`
-// will just allow unknown features (with a warning), we have to explicitly list features that change
-// the ABI as `Forbidden` to ensure using them causes an error. Note that this is only effective if
-// such features can never be toggled via `-Ctarget-cpu`! If that is ever a possibility, we will need
-// extra checks ensuring that the LLVM-computed target features for a CPU did not (un)set a
-// `Forbidden` feature. See https://github.com/rust-lang/rust/issues/116344 for some more context.
-// FIXME: add such "forbidden" features for non-x86 targets.
+// It is important for soundness to consider the interaction of targets features and the function
+// call ABI. For example, disabling the `x87` feature on x86 changes how scalar floats are passed as
+// arguments, so letting people toggle that feature would be unsound. To this end, the
+// `abi_required_features` function computes which target features must and must not be enabled for
+// any given target, and individual features can also be marked as `Forbidden`.
+// See https://github.com/rust-lang/rust/issues/116344 for some more context.
 //
 // The one exception to features that change the ABI is features that enable larger vector
-// registers. Those are permitted to be listed here. This is currently unsound (see
-// https://github.com/rust-lang/rust/issues/116558); in the future we will have to ensure that
-// functions can only use such vectors as arguments/return types if the corresponding target feature
-// is enabled.
+// registers. Those are permitted to be listed here. The `*_FOR_CORRECT_VECTOR_ABI` arrays store
+// information about which target feature is ABI-required for which vector size; this is used to
+// ensure that vectors can only be passed via `extern "C"` when the right feature is enabled. (For
+// the "Rust" ABI we generally pass vectors by-ref exactly to avoid these issues.)
+// Also see https://github.com/rust-lang/rust/issues/116558.
 //
 // Stabilizing a target feature requires t-lang approval.
 
@@ -137,6 +135,11 @@ const ARM_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     // tidy-alphabetical-start
     ("aclass", Unstable(sym::arm_target_feature), &[]),
     ("aes", Unstable(sym::arm_target_feature), &["neon"]),
+    (
+        "atomics-32",
+        Stability::Forbidden { reason: "unsound because it changes the ABI of atomic operations" },
+        &[],
+    ),
     ("crc", Unstable(sym::arm_target_feature), &[]),
     ("d32", Unstable(sym::arm_target_feature), &[]),
     ("dotprod", Unstable(sym::arm_target_feature), &["neon"]),
@@ -406,6 +409,7 @@ const X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("fma", Stable, &["avx"]),
     ("fxsr", Stable, &[]),
     ("gfni", Unstable(sym::avx512_target_feature), &["sse2"]),
+    ("kl", Unstable(sym::keylocker_x86), &["sse2"]),
     ("lahfsahf", Unstable(sym::lahfsahf_target_feature), &[]),
     ("lzcnt", Stable, &[]),
     ("movbe", Stable, &[]),
@@ -419,7 +423,9 @@ const X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("sha512", Unstable(sym::sha512_sm_x86), &["avx2"]),
     ("sm3", Unstable(sym::sha512_sm_x86), &["avx"]),
     ("sm4", Unstable(sym::sha512_sm_x86), &["avx2"]),
-    ("soft-float", Stability::Forbidden { reason: "unsound because it changes float ABI" }, &[]),
+    // This cannot actually be toggled, the ABI always fixes it, so it'd make little sense to
+    // stabilize. It must be in this list for the ABI check to be able to use it.
+    ("soft-float", Stability::Unstable(sym::x87_target_feature), &[]),
     ("sse", Stable, &[]),
     ("sse2", Stable, &["sse"]),
     ("sse3", Stable, &["sse2"]),
@@ -430,6 +436,7 @@ const X86_FEATURES: &[(&str, Stability, ImpliedFeatures)] = &[
     ("tbm", Unstable(sym::tbm_target_feature), &[]),
     ("vaes", Unstable(sym::avx512_target_feature), &["avx2", "aes"]),
     ("vpclmulqdq", Unstable(sym::avx512_target_feature), &["avx", "pclmulqdq"]),
+    ("widekl", Unstable(sym::keylocker_x86), &["kl"]),
     ("x87", Unstable(sym::x87_target_feature), &[]),
     ("xop", Unstable(sym::xop_target_feature), &[/*"fma4", */ "avx", "sse4a"]),
     ("xsave", Stable, &[]),
@@ -770,23 +777,41 @@ impl Target {
         // questions "which ABI is used".
         match &*self.arch {
             "x86" => {
-                // We support 2 ABIs, hardfloat (default) and softfloat.
-                // x86 has no sane ABI indicator so we have to use the target feature.
-                if self.has_feature("soft-float") {
-                    NOTHING
-                } else {
-                    // Hardfloat ABI. x87 must be enabled.
-                    FeatureConstraints { required: &["x87"], incompatible: &[] }
+                // We use our own ABI indicator here; LLVM does not have anything native.
+                // Every case should require or forbid `soft-float`!
+                match self.rustc_abi {
+                    None => {
+                        // Default hardfloat ABI.
+                        // x87 must be enabled, soft-float must be disabled.
+                        FeatureConstraints { required: &["x87"], incompatible: &["soft-float"] }
+                    }
+                    Some(RustcAbi::X86Softfloat) => {
+                        // Softfloat ABI, requires corresponding target feature. That feature trumps
+                        // `x87` and all other FPU features so those do not matter.
+                        // Note that this one requirement is the entire implementation of the ABI!
+                        // LLVM handles the rest.
+                        FeatureConstraints { required: &["soft-float"], incompatible: &[] }
+                    }
                 }
             }
             "x86_64" => {
-                // We support 2 ABIs, hardfloat (default) and softfloat.
-                // x86 has no sane ABI indicator so we have to use the target feature.
-                if self.has_feature("soft-float") {
-                    NOTHING
-                } else {
-                    // Hardfloat ABI. x87 and SSE2 must be enabled.
-                    FeatureConstraints { required: &["x87", "sse2"], incompatible: &[] }
+                // We use our own ABI indicator here; LLVM does not have anything native.
+                // Every case should require or forbid `soft-float`!
+                match self.rustc_abi {
+                    None => {
+                        // Default hardfloat ABI. On x86-64, this always includes SSE2.
+                        FeatureConstraints {
+                            required: &["x87", "sse2"],
+                            incompatible: &["soft-float"],
+                        }
+                    }
+                    Some(RustcAbi::X86Softfloat) => {
+                        // Softfloat ABI, requires corresponding target feature. That feature trumps
+                        // `x87` and all other FPU features so those do not matter.
+                        // Note that this one requirement is the entire implementation of the ABI!
+                        // LLVM handles the rest.
+                        FeatureConstraints { required: &["soft-float"], incompatible: &[] }
+                    }
                 }
             }
             "arm" => {

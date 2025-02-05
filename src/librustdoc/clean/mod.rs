@@ -1104,17 +1104,29 @@ fn clean_args_from_types_and_names<'tcx>(
     types: &[hir::Ty<'tcx>],
     names: &[Ident],
 ) -> Arguments {
+    fn nonempty_name(ident: &Ident) -> Option<Symbol> {
+        if ident.name == kw::Underscore || ident.name == kw::Empty {
+            None
+        } else {
+            Some(ident.name)
+        }
+    }
+
+    // If at least one argument has a name, use `_` as the name of unnamed
+    // arguments. Otherwise omit argument names.
+    let default_name = if names.iter().any(|ident| nonempty_name(ident).is_some()) {
+        kw::Underscore
+    } else {
+        kw::Empty
+    };
+
     Arguments {
         values: types
             .iter()
             .enumerate()
             .map(|(i, ty)| Argument {
                 type_: clean_ty(ty, cx),
-                name: names
-                    .get(i)
-                    .map(|ident| ident.name)
-                    .filter(|ident| !ident.is_empty())
-                    .unwrap_or(kw::Underscore),
+                name: names.get(i).and_then(nonempty_name).unwrap_or(default_name),
                 is_const: false,
             })
             .collect(),
@@ -1747,9 +1759,9 @@ fn maybe_expand_private_type_alias<'tcx>(
     };
     let hir::ItemKind::TyAlias(ty, generics) = alias else { return None };
 
-    let provided_params = &path.segments.last().expect("segments were empty");
+    let final_seg = &path.segments.last().expect("segments were empty");
     let mut args = DefIdMap::default();
-    let generic_args = provided_params.args();
+    let generic_args = final_seg.args();
 
     let mut indices: hir::GenericParamCount = Default::default();
     for param in generics.params.iter() {
@@ -1781,7 +1793,7 @@ fn maybe_expand_private_type_alias<'tcx>(
                 let type_ = generic_args.args.iter().find_map(|arg| match arg {
                     hir::GenericArg::Type(ty) => {
                         if indices.types == j {
-                            return Some(*ty);
+                            return Some(ty.as_unambig_ty());
                         }
                         j += 1;
                         None
@@ -1843,10 +1855,13 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
             ImplTrait(ty.bounds.iter().filter_map(|x| clean_generic_bound(x, cx)).collect())
         }
         TyKind::Path(_) => clean_qpath(ty, cx),
-        TyKind::TraitObject(bounds, lifetime, _) => {
+        TyKind::TraitObject(bounds, lifetime) => {
             let bounds = bounds.iter().map(|bound| clean_poly_trait_ref(bound, cx)).collect();
-            let lifetime =
-                if !lifetime.is_elided() { Some(clean_lifetime(lifetime, cx)) } else { None };
+            let lifetime = if !lifetime.is_elided() {
+                Some(clean_lifetime(lifetime.pointer(), cx))
+            } else {
+                None
+            };
             DynTrait(bounds, lifetime)
         }
         TyKind::BareFn(barefn) => BareFunction(Box::new(clean_bare_fn_ty(barefn, cx))),
@@ -1854,7 +1869,7 @@ pub(crate) fn clean_ty<'tcx>(ty: &hir::Ty<'tcx>, cx: &mut DocContext<'tcx>) -> T
             UnsafeBinder(Box::new(clean_unsafe_binder_ty(unsafe_binder_ty, cx)))
         }
         // Rustdoc handles `TyKind::Err`s by turning them into `Type::Infer`s.
-        TyKind::Infer
+        TyKind::Infer(())
         | TyKind::Err(_)
         | TyKind::Typeof(..)
         | TyKind::InferDelegation(..)
@@ -1931,7 +1946,7 @@ fn can_elide_trait_object_lifetime_bound<'tcx>(
     preds: &'tcx ty::List<ty::PolyExistentialPredicate<'tcx>>,
     tcx: TyCtxt<'tcx>,
 ) -> bool {
-    // Below we quote extracts from https://doc.rust-lang.org/reference/lifetime-elision.html#default-trait-object-lifetimes
+    // Below we quote extracts from https://doc.rust-lang.org/stable/reference/lifetime-elision.html#default-trait-object-lifetimes
 
     // > If the trait object is used as a type argument of a generic type then the containing type is
     // > first used to try to infer a bound.
@@ -2533,8 +2548,10 @@ fn clean_generic_args<'tcx>(
                     GenericArg::Lifetime(clean_lifetime(lt, cx))
                 }
                 hir::GenericArg::Lifetime(_) => GenericArg::Lifetime(Lifetime::elided()),
-                hir::GenericArg::Type(ty) => GenericArg::Type(clean_ty(ty, cx)),
-                hir::GenericArg::Const(ct) => GenericArg::Const(Box::new(clean_const(ct, cx))),
+                hir::GenericArg::Type(ty) => GenericArg::Type(clean_ty(ty.as_unambig_ty(), cx)),
+                hir::GenericArg::Const(ct) => {
+                    GenericArg::Const(Box::new(clean_const(ct.as_unambig_ct(), cx)))
+                }
                 hir::GenericArg::Infer(_inf) => GenericArg::Infer,
             })
             .collect::<Vec<_>>()

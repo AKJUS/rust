@@ -11,7 +11,7 @@ use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_data_structures::unord::UnordMap;
 use rustc_errors::codes::*;
 use rustc_errors::{
-    Applicability, Diag, ErrorGuaranteed, MultiSpan, StashKey, Subdiagnostic, pluralize,
+    Applicability, Diag, ErrorGuaranteed, MultiSpan, StashKey, Subdiagnostic, listify, pluralize,
     struct_span_code_err,
 };
 use rustc_hir::def::{CtorKind, DefKind, Res};
@@ -412,7 +412,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             })
             | hir::Node::ImplItem(hir::ImplItem { kind: hir::ImplItemKind::Const(..), .. }) => true,
 
-            hir::Node::Pat(_) => {
+            hir::Node::TyPat(_) | hir::Node::Pat(_) => {
                 self.dcx().span_delayed_bug(expr.span, "place expr not allowed in pattern");
                 true
             }
@@ -480,7 +480,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             hir::PatKind::Binding(_, _, _, _)
             | hir::PatKind::Struct(_, _, _)
             | hir::PatKind::TupleStruct(_, _, _)
-            | hir::PatKind::Path(_)
             | hir::PatKind::Tuple(_, _)
             | hir::PatKind::Box(_)
             | hir::PatKind::Ref(_, _)
@@ -1659,8 +1658,6 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         hir_ty: Option<&'tcx hir::Ty<'tcx>>,
         expected: Expectation<'tcx>,
     ) -> Ty<'tcx> {
-        self.dcx().span_err(inner_expr.span, "unsafe binder casts are not fully implemented");
-
         match kind {
             hir::UnsafeBinderCastKind::Wrap => {
                 let ascribed_ty =
@@ -1991,18 +1988,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         adt_ty: Ty<'tcx>,
         expected: Expectation<'tcx>,
         expr: &hir::Expr<'_>,
-        span: Span,
+        path_span: Span,
         variant: &'tcx ty::VariantDef,
         hir_fields: &'tcx [hir::ExprField<'tcx>],
         base_expr: &'tcx hir::StructTailExpr<'tcx>,
     ) {
         let tcx = self.tcx;
 
-        let adt_ty = self.try_structurally_resolve_type(span, adt_ty);
+        let adt_ty = self.try_structurally_resolve_type(path_span, adt_ty);
         let adt_ty_hint = expected.only_has_type(self).and_then(|expected| {
             self.fudge_inference_if_ok(|| {
                 let ocx = ObligationCtxt::new(self);
-                ocx.sup(&self.misc(span), self.param_env, expected, adt_ty)?;
+                ocx.sup(&self.misc(path_span), self.param_env, expected, adt_ty)?;
                 if !ocx.select_where_possible().is_empty() {
                     return Err(TypeError::Mismatch);
                 }
@@ -2012,11 +2009,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         });
         if let Some(adt_ty_hint) = adt_ty_hint {
             // re-link the variables that the fudging above can create.
-            self.demand_eqtype(span, adt_ty_hint, adt_ty);
+            self.demand_eqtype(path_span, adt_ty_hint, adt_ty);
         }
 
         let ty::Adt(adt, args) = adt_ty.kind() else {
-            span_bug!(span, "non-ADT passed to check_expr_struct_fields");
+            span_bug!(path_span, "non-ADT passed to check_expr_struct_fields");
         };
         let adt_kind = adt.adt_kind();
 
@@ -2107,7 +2104,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         if adt_kind == AdtKind::Union && hir_fields.len() != 1 {
             struct_span_code_err!(
                 self.dcx(),
-                span,
+                path_span,
                 E0784,
                 "union expressions should have exactly one field",
             )
@@ -2138,13 +2135,24 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 }
             }
             if !self.tcx.features().default_field_values() {
+                let sugg = self.tcx.crate_level_attribute_injection_span(expr.hir_id);
                 self.dcx().emit_err(BaseExpressionDoubleDot {
                     span: span.shrink_to_hi(),
                     // We only mention enabling the feature if this is a nightly rustc *and* the
                     // expression would make sense with the feature enabled.
-                    default_field_values: if self.tcx.sess.is_nightly_build()
+                    default_field_values_suggestion: if self.tcx.sess.is_nightly_build()
                         && missing_mandatory_fields.is_empty()
                         && !missing_optional_fields.is_empty()
+                        && sugg.is_some()
+                    {
+                        sugg
+                    } else {
+                        None
+                    },
+                    default_field_values_help: if self.tcx.sess.is_nightly_build()
+                        && missing_mandatory_fields.is_empty()
+                        && !missing_optional_fields.is_empty()
+                        && sugg.is_none()
                     {
                         Some(BaseExpressionDoubleDotEnableDefaultFieldValues)
                     } else {
@@ -2167,15 +2175,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 });
                 return;
             }
+            if variant.fields.is_empty() {
+                let mut err = self.dcx().struct_span_err(
+                    span,
+                    format!(
+                        "`{adt_ty}` has no fields, `..` needs at least one default field in the \
+                         struct definition",
+                    ),
+                );
+                err.span_label(path_span, "this type has no fields");
+                err.emit();
+            }
             if !missing_mandatory_fields.is_empty() {
                 let s = pluralize!(missing_mandatory_fields.len());
-                let fields: Vec<_> =
-                    missing_mandatory_fields.iter().map(|f| format!("`{f}`")).collect();
-                let fields = match &fields[..] {
-                    [] => unreachable!(),
-                    [only] => only.to_string(),
-                    [start @ .., last] => format!("{} and {last}", start.join(", ")),
-                };
+                let fields = listify(&missing_mandatory_fields, |f| format!("`{f}`")).unwrap();
                 self.dcx()
                     .struct_span_err(
                         span.shrink_to_hi(),
@@ -2316,11 +2329,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 .collect();
 
             if !private_fields.is_empty() {
-                self.report_private_fields(adt_ty, span, expr.span, private_fields, hir_fields);
+                self.report_private_fields(
+                    adt_ty,
+                    path_span,
+                    expr.span,
+                    private_fields,
+                    hir_fields,
+                );
             } else {
                 self.report_missing_fields(
                     adt_ty,
-                    span,
+                    path_span,
+                    expr.span,
                     remaining_fields,
                     variant,
                     hir_fields,
@@ -2358,6 +2378,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         &self,
         adt_ty: Ty<'tcx>,
         span: Span,
+        full_span: Span,
         remaining_fields: UnordMap<Ident, (FieldIdx, &ty::FieldDef)>,
         variant: &'tcx ty::VariantDef,
         hir_fields: &'tcx [hir::ExprField<'tcx>],
@@ -2396,6 +2417,34 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             adt_ty
         );
         err.span_label(span, format!("missing {remaining_fields_names}{truncated_fields_error}"));
+
+        if remaining_fields.items().all(|(_, (_, field))| field.value.is_some())
+            && self.tcx.sess.is_nightly_build()
+        {
+            let msg = format!(
+                "all remaining fields have default values, {you_can} use those values with `..`",
+                you_can = if self.tcx.features().default_field_values() {
+                    "you can"
+                } else {
+                    "if you added `#![feature(default_field_values)]` to your crate you could"
+                },
+            );
+            if let Some(hir_field) = hir_fields.last() {
+                err.span_suggestion_verbose(
+                    hir_field.span.shrink_to_hi(),
+                    msg,
+                    ", ..".to_string(),
+                    Applicability::MachineApplicable,
+                );
+            } else if hir_fields.is_empty() {
+                err.span_suggestion_verbose(
+                    span.shrink_to_hi().with_hi(full_span.hi()),
+                    msg,
+                    " { .. }".to_string(),
+                    Applicability::MachineApplicable,
+                );
+            }
+        }
 
         if let Some(hir_field) = hir_fields.last() {
             self.suggest_fru_from_range_and_emit(hir_field, variant, args, err);
@@ -2496,25 +2545,20 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .partition(|field| field.2);
         err.span_labels(used_private_fields.iter().map(|(_, span, _)| *span), "private field");
         if !remaining_private_fields.is_empty() {
-            let remaining_private_fields_len = remaining_private_fields.len();
-            let names = match &remaining_private_fields
-                .iter()
-                .map(|(name, _, _)| name)
-                .collect::<Vec<_>>()[..]
-            {
-                _ if remaining_private_fields_len > 6 => String::new(),
-                [name] => format!("`{name}` "),
-                [names @ .., last] => {
-                    let names = names.iter().map(|name| format!("`{name}`")).collect::<Vec<_>>();
-                    format!("{} and `{last}` ", names.join(", "))
-                }
-                [] => bug!("expected at least one private field to report"),
+            let names = if remaining_private_fields.len() > 6 {
+                String::new()
+            } else {
+                format!(
+                    "{} ",
+                    listify(&remaining_private_fields, |(name, _, _)| format!("`{name}`"))
+                        .expect("expected at least one private field to report")
+                )
             };
             err.note(format!(
                 "{}private field{s} {names}that {were} not provided",
                 if used_fields.is_empty() { "" } else { "...and other " },
-                s = pluralize!(remaining_private_fields_len),
-                were = pluralize!("was", remaining_private_fields_len),
+                s = pluralize!(remaining_private_fields.len()),
+                were = pluralize!("was", remaining_private_fields.len()),
             ));
         }
 
@@ -3279,10 +3323,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 })
                 .map(|mut field_path| {
                     field_path.pop();
-                    field_path
-                        .iter()
-                        .map(|id| format!("{}.", id.name.to_ident_string()))
-                        .collect::<String>()
+                    field_path.iter().map(|id| format!("{}.", id)).collect::<String>()
                 })
                 .collect::<Vec<_>>();
             candidate_fields.sort();

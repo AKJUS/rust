@@ -440,10 +440,12 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             | Rvalue::Use(..)
             | Rvalue::CopyForDeref(..)
             | Rvalue::Repeat(..)
+            | Rvalue::Len(..)
             | Rvalue::Cast(..)
             | Rvalue::ShallowInitBox(..)
             | Rvalue::Discriminant(..)
-            | Rvalue::NullaryOp(..) => {}
+            | Rvalue::NullaryOp(..)
+            | Rvalue::WrapUnsafeBinder(..) => {}
         }
 
         // FIXME we need to revisit this for #67176
@@ -545,7 +547,9 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
         let val: Value<'_> = match *rvalue {
             ThreadLocalRef(_) => return None,
 
-            Use(ref operand) => self.eval_operand(operand)?.into(),
+            Use(ref operand) | WrapUnsafeBinder(ref operand, _) => {
+                self.eval_operand(operand)?.into()
+            }
 
             CopyForDeref(place) => self.eval_place(place)?.into(),
 
@@ -597,6 +601,20 @@ impl<'mir, 'tcx> ConstPropagator<'mir, 'tcx> {
             Repeat(ref op, n) => {
                 trace!(?op, ?n);
                 return None;
+            }
+
+            Len(place) => {
+                let len = if let ty::Array(_, n) = place.ty(self.local_decls(), self.tcx).ty.kind()
+                {
+                    n.try_to_target_usize(self.tcx)?
+                } else {
+                    match self.get_const(place)? {
+                        Value::Immediate(src) => src.len(&self.ecx).discard_err()?,
+                        Value::Aggregate { fields, .. } => fields.len() as u64,
+                        Value::Uninit => return None,
+                    }
+                };
+                ImmTy::from_scalar(Scalar::from_target_usize(len, self), layout).into()
             }
 
             Ref(..) | RawPtr(..) => return None,

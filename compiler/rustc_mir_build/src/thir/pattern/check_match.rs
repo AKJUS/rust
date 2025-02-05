@@ -25,7 +25,7 @@ use rustc_session::lint::builtin::{
 };
 use rustc_span::edit_distance::find_best_match_for_name;
 use rustc_span::hygiene::DesugaringKind;
-use rustc_span::{Span, sym};
+use rustc_span::{Ident, Span, sym};
 use rustc_trait_selection::infer::InferCtxtExt;
 use tracing::instrument;
 
@@ -326,9 +326,10 @@ impl<'p, 'tcx> MatchVisitor<'p, 'tcx> {
             | Use { source }
             | PointerCoercion { source, .. }
             | PlaceTypeAscription { source, .. }
-            | ValueTypeAscription { source, .. } => {
-                self.is_known_valid_scrutinee(&self.thir()[*source])
-            }
+            | ValueTypeAscription { source, .. }
+            | PlaceUnwrapUnsafeBinder { source }
+            | ValueUnwrapUnsafeBinder { source }
+            | WrapUnsafeBinder { source } => self.is_known_valid_scrutinee(&self.thir()[*source]),
 
             // These diverge.
             Become { .. } | Break { .. } | Continue { .. } | Return { .. } => true,
@@ -795,13 +796,17 @@ fn check_borrow_conflicts_in_at_patterns<'tcx>(cx: &MatchVisitor<'_, 'tcx>, pat:
                 }
             });
             if !conflicts_ref.is_empty() {
-                sess.dcx().emit_err(BorrowOfMovedValue {
+                let mut path = None;
+                let ty = cx.tcx.short_string(ty, &mut path);
+                let mut err = sess.dcx().create_err(BorrowOfMovedValue {
                     binding_span: pat.span,
                     conflicts_ref,
-                    name,
+                    name: Ident::new(name, pat.span),
                     ty,
                     suggest_borrowing: Some(pat.span.shrink_to_lo()),
                 });
+                *err.long_ty_path() = path;
+                err.emit();
             }
             return;
         }
@@ -904,7 +909,7 @@ fn check_for_bindings_named_same_as_variants(
                     None
                 },
                 ty_path,
-                name,
+                name: Ident::new(name, pat.span),
             },
         )
     }
@@ -1086,14 +1091,13 @@ fn find_fallback_pattern_typo<'tcx>(
                 let vis = cx.tcx.visibility(item.owner_id);
                 if vis.is_accessible_from(parent, cx.tcx) {
                     accessible.push(item_name);
-                    let path = if item_name == name {
-                        // We know that the const wasn't in scope because it has the exact
-                        // same name, so we suggest the full path.
-                        with_no_trimmed_paths!(cx.tcx.def_path_str(item.owner_id))
-                    } else {
-                        // The const is likely just typoed, and nothing else.
-                        cx.tcx.def_path_str(item.owner_id)
-                    };
+                    // FIXME: the line below from PR #135310 is a workaround for the ICE in issue
+                    // #135289, where a macro in a dependency can create unreachable patterns in the
+                    // current crate. Path trimming expects diagnostics for a typoed const, but no
+                    // diagnostics are emitted and we ICE. See
+                    // `tests/ui/resolve/const-with-typo-in-pattern-binding-ice-135289.rs` for a
+                    // test that reproduces the ICE if we don't use `with_no_trimmed_paths!`.
+                    let path = with_no_trimmed_paths!(cx.tcx.def_path_str(item.owner_id));
                     accessible_path.push(path);
                 } else if name == item_name {
                     // The const exists somewhere in this crate, but it can't be imported

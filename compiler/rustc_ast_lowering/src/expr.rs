@@ -284,9 +284,6 @@ impl<'hir> LoweringContext<'_, 'hir> {
                 ExprKind::Index(el, er, brackets_span) => {
                     hir::ExprKind::Index(self.lower_expr(el), self.lower_expr(er), *brackets_span)
                 }
-                ExprKind::Range(Some(e1), Some(e2), RangeLimits::Closed) => {
-                    self.lower_expr_range_closed(e.span, e1, e2)
-                }
                 ExprKind::Range(e1, e2, lims) => {
                     self.lower_expr_range(e.span, e1.as_deref(), e2.as_deref(), *lims)
                 }
@@ -1391,7 +1388,11 @@ impl<'hir> LoweringContext<'_, 'hir> {
                         None,
                     );
                     // Destructure like a unit struct.
-                    let unit_struct_pat = hir::PatKind::Path(qpath);
+                    let unit_struct_pat = hir::PatKind::Expr(self.arena.alloc(hir::PatExpr {
+                        kind: hir::PatExprKind::Path(qpath),
+                        hir_id: self.next_id(),
+                        span: self.lower_span(lhs.span),
+                    }));
                     return self.pat_without_dbm(lhs.span, unit_struct_pat);
                 }
             }
@@ -1508,15 +1509,39 @@ impl<'hir> LoweringContext<'_, 'hir> {
 
         let lang_item = match (e1, e2, lims) {
             (None, None, HalfOpen) => hir::LangItem::RangeFull,
-            (Some(..), None, HalfOpen) => hir::LangItem::RangeFrom,
+            (Some(..), None, HalfOpen) => {
+                if self.tcx.features().new_range() {
+                    hir::LangItem::RangeFromCopy
+                } else {
+                    hir::LangItem::RangeFrom
+                }
+            }
             (None, Some(..), HalfOpen) => hir::LangItem::RangeTo,
-            (Some(..), Some(..), HalfOpen) => hir::LangItem::Range,
+            (Some(..), Some(..), HalfOpen) => {
+                if self.tcx.features().new_range() {
+                    hir::LangItem::RangeCopy
+                } else {
+                    hir::LangItem::Range
+                }
+            }
             (None, Some(..), Closed) => hir::LangItem::RangeToInclusive,
-            (Some(..), Some(..), Closed) => unreachable!(),
+            (Some(e1), Some(e2), Closed) => {
+                if self.tcx.features().new_range() {
+                    hir::LangItem::RangeInclusiveCopy
+                } else {
+                    return self.lower_expr_range_closed(span, e1, e2);
+                }
+            }
             (start, None, Closed) => {
                 self.dcx().emit_err(InclusiveRangeWithNoEnd { span });
                 match start {
-                    Some(..) => hir::LangItem::RangeFrom,
+                    Some(..) => {
+                        if self.tcx.features().new_range() {
+                            hir::LangItem::RangeFromCopy
+                        } else {
+                            hir::LangItem::RangeFrom
+                        }
+                    }
                     None => hir::LangItem::RangeFull,
                 }
             }
@@ -2125,7 +2150,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         self.arena.alloc(self.expr_call_mut(span, e, args))
     }
 
-    fn expr_call_lang_item_fn_mut(
+    pub(super) fn expr_call_lang_item_fn_mut(
         &mut self,
         span: Span,
         lang_item: hir::LangItem,
@@ -2135,7 +2160,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         self.expr_call_mut(span, path, args)
     }
 
-    fn expr_call_lang_item_fn(
+    pub(super) fn expr_call_lang_item_fn(
         &mut self,
         span: Span,
         lang_item: hir::LangItem,
@@ -2159,7 +2184,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         let path = hir::ExprKind::Path(hir::QPath::TypeRelative(
             self.arena.alloc(self.ty(span, hir::TyKind::Path(qpath))),
             self.arena.alloc(hir::PathSegment::new(
-                Ident::new(name, span),
+                Ident::new(name, self.lower_span(span)),
                 self.next_id(),
                 Res::Err,
             )),

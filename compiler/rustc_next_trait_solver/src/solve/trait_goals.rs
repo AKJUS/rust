@@ -225,7 +225,7 @@ where
         }
 
         ecx.probe_and_evaluate_goal_for_constituent_tys(
-            CandidateSource::BuiltinImpl(BuiltinImplSource::Misc),
+            CandidateSource::BuiltinImpl(BuiltinImplSource::Trivial),
             goal,
             structural_traits::instantiate_constituent_tys_for_sized_trait,
         )
@@ -1194,14 +1194,46 @@ where
             };
         }
 
-        // FIXME: prefer trivial builtin impls
+        // We prefer trivial builtin candidates, i.e. builtin impls without any
+        // nested requirements, over all others. This is a fix for #53123 and
+        // prevents where-bounds from accidentally extending the lifetime of a
+        // variable.
+        let mut trivial_builtin_impls = candidates.iter().filter(|c| {
+            matches!(c.source, CandidateSource::BuiltinImpl(BuiltinImplSource::Trivial))
+        });
+        if let Some(candidate) = trivial_builtin_impls.next() {
+            // There should only ever be a single trivial builtin candidate
+            // as they would otherwise overlap.
+            assert!(trivial_builtin_impls.next().is_none());
+            return Ok((candidate.result, Some(TraitGoalProvenVia::Misc)));
+        }
 
         // If there are non-global where-bounds, prefer where-bounds
         // (including global ones) over everything else.
         let has_non_global_where_bounds = candidates.iter().any(|c| match c.source {
             CandidateSource::ParamEnv(idx) => {
-                let where_bound = goal.param_env.caller_bounds().get(idx);
-                where_bound.has_bound_vars() || !where_bound.is_global()
+                let where_bound = goal.param_env.caller_bounds().get(idx).unwrap();
+                let ty::ClauseKind::Trait(trait_pred) = where_bound.kind().skip_binder() else {
+                    unreachable!("expected trait-bound: {where_bound:?}");
+                };
+
+                if trait_pred.has_bound_vars() || !trait_pred.is_global() {
+                    return true;
+                }
+
+                // We don't consider a trait-bound global if it has a projection bound.
+                //
+                // See ui/traits/next-solver/normalization-shadowing/global-trait-with-project.rs
+                // for an example where this is necessary.
+                for p in goal.param_env.caller_bounds().iter() {
+                    if let ty::ClauseKind::Projection(proj) = p.kind().skip_binder() {
+                        if proj.projection_term.trait_ref(self.cx()) == trait_pred.trait_ref {
+                            return true;
+                        }
+                    }
+                }
+
+                false
             }
             _ => false,
         });

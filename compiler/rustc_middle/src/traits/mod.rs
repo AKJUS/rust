@@ -21,13 +21,12 @@ use rustc_macros::{
 };
 use rustc_span::def_id::{CRATE_DEF_ID, LocalDefId};
 use rustc_span::{DUMMY_SP, Span, Symbol};
-// FIXME: Remove this import and import via `solve::`
-pub use rustc_type_ir::solve::BuiltinImplSource;
 use smallvec::{SmallVec, smallvec};
 use thin_vec::ThinVec;
 
 pub use self::select::{EvaluationCache, EvaluationResult, OverflowError, SelectionCache};
 use crate::mir::ConstraintCategory;
+pub use crate::traits::solve::BuiltinImplSource;
 use crate::ty::abstract_const::NotConstEvaluatable;
 use crate::ty::{self, AdtKind, GenericArgsRef, Ty};
 
@@ -194,6 +193,9 @@ pub enum ObligationCauseCode<'tcx> {
     /// A slice or array is WF only if `T: Sized`.
     SliceOrArrayElem,
 
+    /// An array `[T; N]` can only be indexed (and is only well-formed if) `N` has type usize.
+    ArrayLen(Ty<'tcx>),
+
     /// A tuple is WF only if its middle elements are `Sized`.
     TupleElem,
 
@@ -345,9 +347,6 @@ pub enum ObligationCauseCode<'tcx> {
     /// `main` has wrong type
     MainFunctionType,
 
-    /// `start` has wrong type
-    StartFunctionType,
-
     /// language function has wrong type
     LangFunctionType(Symbol),
 
@@ -428,7 +427,7 @@ pub enum IsConstable {
     Ctor,
 }
 
-crate::TrivialTypeTraversalAndLiftImpls! {
+TrivialTypeTraversalAndLiftImpls! {
     IsConstable,
 }
 

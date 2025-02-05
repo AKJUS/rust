@@ -61,6 +61,10 @@ impl<'tcx> crate::MirPass<'tcx> for PromoteTemps<'tcx> {
         let promoted = promote_candidates(body, tcx, temps, promotable_candidates);
         self.promoted_fragments.set(promoted);
     }
+
+    fn is_required(&self) -> bool {
+        true
+    }
 }
 
 /// State of a temporary during collection and promotion.
@@ -289,7 +293,8 @@ impl<'tcx> Validator<'_, 'tcx> {
             // Recurse directly.
             ProjectionElem::ConstantIndex { .. }
             | ProjectionElem::Subtype(_)
-            | ProjectionElem::Subslice { .. } => {}
+            | ProjectionElem::Subslice { .. }
+            | ProjectionElem::UnwrapUnsafeBinder(_) => {}
 
             // Never recurse.
             ProjectionElem::OpaqueCast(..) | ProjectionElem::Downcast(..) => {
@@ -422,7 +427,9 @@ impl<'tcx> Validator<'_, 'tcx> {
 
     fn validate_rvalue(&mut self, rvalue: &Rvalue<'tcx>) -> Result<(), Unpromotable> {
         match rvalue {
-            Rvalue::Use(operand) | Rvalue::Repeat(operand, _) => {
+            Rvalue::Use(operand)
+            | Rvalue::Repeat(operand, _)
+            | Rvalue::WrapUnsafeBinder(operand, _) => {
                 self.validate_operand(operand)?;
             }
             Rvalue::CopyForDeref(place) => {
@@ -430,7 +437,9 @@ impl<'tcx> Validator<'_, 'tcx> {
                 self.validate_operand(op)?
             }
 
-            Rvalue::Discriminant(place) => self.validate_place(place.as_ref())?,
+            Rvalue::Discriminant(place) | Rvalue::Len(place) => {
+                self.validate_place(place.as_ref())?
+            }
 
             Rvalue::ThreadLocalRef(_) => return Err(Unpromotable),
 
