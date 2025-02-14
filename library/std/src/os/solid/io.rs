@@ -48,7 +48,7 @@
 
 use crate::marker::PhantomData;
 use crate::mem::ManuallyDrop;
-use crate::sys_common::{self, AsInner, FromInner, IntoInner};
+use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::{fmt, net, sys};
 
 /// Raw file descriptors.
@@ -122,7 +122,7 @@ impl BorrowedFd<'_> {
     /// Creates a new `OwnedFd` instance that shares the same underlying file
     /// description as the existing `BorrowedFd` instance.
     pub fn try_clone_to_owned(&self) -> crate::io::Result<OwnedFd> {
-        let fd = sys::net::cvt(unsafe { sys::net::netc::dup(self.as_raw_fd()) })?;
+        let fd = sys::net::cvt(unsafe { crate::sys::abi::sockets::dup(self.as_raw_fd()) })?;
         Ok(unsafe { OwnedFd::from_raw_fd(fd) })
     }
 }
@@ -168,7 +168,7 @@ impl FromRawFd for OwnedFd {
 impl Drop for OwnedFd {
     #[inline]
     fn drop(&mut self) {
-        unsafe { sys::net::netc::close(self.fd.as_inner()) };
+        unsafe { crate::sys::abi::sockets::close(self.fd.as_inner()) };
     }
 }
 
@@ -387,7 +387,7 @@ macro_rules! impl_from_raw_fd {
             #[inline]
             unsafe fn from_raw_fd(fd: RawFd) -> net::$t {
                 let socket = unsafe { sys::net::Socket::from_raw_fd(fd) };
-                net::$t::from_inner(sys_common::net::$t::from_inner(socket))
+                net::$t::from_inner(sys::net::$t::from_inner(socket))
             }
         }
     )*};
