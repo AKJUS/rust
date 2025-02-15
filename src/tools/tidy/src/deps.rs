@@ -253,6 +253,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "bitflags",
     "blake3",
     "block-buffer",
+    "bstr",
     "byteorder", // via ruzstd in object in thorin-dwp
     "cc",
     "cfg-if",
@@ -284,7 +285,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "expect-test",
     "fallible-iterator", // dependency of `thorin`
     "fastrand",
-    "field-offset",
     "flate2",
     "fluent-bundle",
     "fluent-langneg",
@@ -326,7 +326,6 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "measureme",
     "memchr",
     "memmap2",
-    "memoffset",
     "miniz_oxide",
     "nix",
     "nu-ansi-term",
@@ -366,14 +365,12 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "rustc-rayon-core",
     "rustc-stable-hash",
     "rustc_apfloat",
-    "rustc_version",
     "rustix",
     "ruzstd", // via object in thorin-dwp
     "ryu",
     "scoped-tls",
     "scopeguard",
     "self_cell",
-    "semver",
     "serde",
     "serde_derive",
     "serde_json",
@@ -438,6 +435,7 @@ const PERMITTED_RUSTC_DEPENDENCIES: &[&str] = &[
     "windows-implement",
     "windows-interface",
     "windows-result",
+    "windows-strings",
     "windows-sys",
     "windows-targets",
     "windows_aarch64_gnullvm",
@@ -478,6 +476,8 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "memchr",
     "miniz_oxide",
     "object",
+    "proc-macro2",
+    "quote",
     "r-efi",
     "r-efi-alloc",
     "rand",
@@ -485,6 +485,8 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "rand_xorshift",
     "rustc-demangle",
     "shlex",
+    "syn",
+    "unicode-ident",
     "unicode-width",
     "unwinding",
     "wasi",
@@ -498,6 +500,8 @@ const PERMITTED_STDLIB_DEPENDENCIES: &[&str] = &[
     "windows_x86_64_gnu",
     "windows_x86_64_gnullvm",
     "windows_x86_64_msvc",
+    "zerocopy",
+    "zerocopy-derive",
     // tidy-alphabetical-end
 ];
 

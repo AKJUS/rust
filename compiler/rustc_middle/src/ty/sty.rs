@@ -1199,7 +1199,7 @@ impl<'tcx> Ty<'tcx> {
     }
 
     #[inline]
-    pub fn is_unsafe_ptr(self) -> bool {
+    pub fn is_raw_ptr(self) -> bool {
         matches!(self.kind(), RawPtr(_, _))
     }
 
@@ -1207,7 +1207,7 @@ impl<'tcx> Ty<'tcx> {
     /// `Box` is *not* considered a pointer here!
     #[inline]
     pub fn is_any_ptr(self) -> bool {
-        self.is_ref() || self.is_unsafe_ptr() || self.is_fn_ptr()
+        self.is_ref() || self.is_raw_ptr() || self.is_fn_ptr()
     }
 
     #[inline]
@@ -1394,7 +1394,7 @@ impl<'tcx> Ty<'tcx> {
     /// Returns the type and mutability of `*ty`.
     ///
     /// The parameter `explicit` indicates if this is an *explicit* dereference.
-    /// Some types -- notably unsafe ptrs -- can only be dereferenced explicitly.
+    /// Some types -- notably raw ptrs -- can only be dereferenced explicitly.
     pub fn builtin_deref(self, explicit: bool) -> Option<Ty<'tcx>> {
         match *self.kind() {
             _ if let Some(boxed) = self.boxed_ty() => Some(boxed),
@@ -1894,11 +1894,11 @@ impl<'tcx> Ty<'tcx> {
 
             ty::Str | ty::Slice(_) | ty::Dynamic(_, _, ty::Dyn) | ty::Foreign(..) => false,
 
-            ty::Tuple(tys) => tys.last().map_or(true, |ty| ty.is_trivially_sized(tcx)),
+            ty::Tuple(tys) => tys.last().is_none_or(|ty| ty.is_trivially_sized(tcx)),
 
             ty::Adt(def, args) => def
                 .sized_constraint(tcx)
-                .map_or(true, |ty| ty.instantiate(tcx, args).is_trivially_sized(tcx)),
+                .is_none_or(|ty| ty.instantiate(tcx, args).is_trivially_sized(tcx)),
 
             ty::Alias(..) | ty::Param(_) | ty::Placeholder(..) | ty::Bound(..) => false,
 

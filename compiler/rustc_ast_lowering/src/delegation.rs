@@ -41,13 +41,13 @@ use std::iter;
 use ast::visit::Visitor;
 use hir::def::{DefKind, PartialRes, Res};
 use hir::{BodyId, HirId};
+use rustc_abi::ExternAbi;
 use rustc_ast::*;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def_id::DefId;
 use rustc_middle::span_bug;
 use rustc_middle::ty::{Asyncness, ResolverAstLowering};
 use rustc_span::{Ident, Span};
-use rustc_target::spec::abi;
 use {rustc_ast as ast, rustc_hir as hir};
 
 use super::{GenericArgsMode, ImplTraitContext, LoweringContext, ParamMode};
@@ -72,7 +72,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
         if let Some(local_sig_id) = def_id.as_local() {
             // The value may be missing due to recursive delegation.
             // Error will be emitted later during HIR ty lowering.
-            self.resolver.delegation_fn_sigs.get(&local_sig_id).map_or(false, |sig| sig.has_self)
+            self.resolver.delegation_fn_sigs.get(&local_sig_id).is_some_and(|sig| sig.has_self)
         } else {
             match self.tcx.def_kind(def_id) {
                 DefKind::Fn => false,
@@ -398,7 +398,7 @@ impl<'hir> LoweringContext<'_, 'hir> {
             safety: hir::Safety::Safe.into(),
             constness: hir::Constness::NotConst,
             asyncness: hir::IsAsync::NotAsync,
-            abi: abi::Abi::Rust,
+            abi: ExternAbi::Rust,
         }
     }
 
