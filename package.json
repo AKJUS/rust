@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "browser-ui-test": "^0.22.2",
-    "es-check": "^6.2.1",
+    "es-check": "^9.6.1",
     "eslint": "^8.57.1",
     "typescript": "^5.8.3"
   },
